@@ -1,0 +1,110 @@
+import os
+from fastapi import FastAPI, Request
+from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
+from dotenv import load_dotenv
+import config
+
+load_dotenv()
+
+from db.storage import init_db, db
+from routes import accounts, trading, auth
+
+app = FastAPI(title="PMS Trading Skeleton")
+
+# Setup Templates
+templates = Jinja2Templates(directory="templates")
+
+# Include routers
+app.include_router(auth.router, prefix="/auth", tags=["auth"])
+app.include_router(auth.router, prefix="/broker", tags=["broker"]) # Alias for Zerodha redirect
+app.include_router(accounts.router, prefix="/accounts", tags=["accounts"])
+app.include_router(trading.router, prefix="/trading", tags=["trading"])
+
+@app.on_event("startup")
+async def startup():
+    await init_db()
+    
+    # Sync Config Accounts to DB
+    print("Syncing configured accounts to DB...")
+    config_ids = set()
+    
+    for acc_cfg in config.ACCOUNTS:
+        config_ids.add(acc_cfg["user_id"])
+        existing = await db.accounts.find_one({"account_id": acc_cfg["user_id"]})
+        if not existing:
+            # Create new
+            doc = {
+                "account_id": acc_cfg["user_id"],
+                "api_key": acc_cfg["api_key"],
+                "api_secret": acc_cfg["api_secret"],
+                "is_master": acc_cfg.get("is_master", False),
+                "capital": acc_cfg.get("capital", 0),
+                "access_token": None,
+                "request_token": None,
+                "status": "pending",
+                "linked_at": None
+            }
+            await db.accounts.insert_one(doc)
+            print(f"Created account: {doc['account_id']}")
+        else:
+            # Update config fields (keys/secrets might change)
+            await db.accounts.update_one(
+                {"account_id": acc_cfg["user_id"]},
+                {
+                    "$set": {
+                        "api_key": acc_cfg["api_key"],
+                        "api_secret": acc_cfg["api_secret"],
+                        "is_master": acc_cfg.get("is_master", False)
+                    }
+                }
+            )
+            print(f"Updated account: {acc_cfg['user_id']}")
+            
+    # Remove stale accounts NOT in config
+    all_accounts = await db.accounts.find({})
+    for acc in all_accounts:
+        if acc["account_id"] not in config_ids:
+            print(f"Removing stale account: {acc['account_id']}")
+            # We don't have a delete_one method in storage.py yet, let's just filter list
+            # But storage.py is append-only JSONStore mostly? 
+            # Actually storage.py update_one logic suggests it rewrites file.
+            # We need a delete method or we just re-write the whole file.
+            
+    # Since storage.py is simple, let's just cheat and re-write the file with ONLY config accounts + existing state
+    # Actually, simpler: we just tell the user to delete data/accounts.json 
+    # OR we implement a delete_one in storage.py.
+    
+    # Wait, looking at storage.py, it doesn't have delete.
+    # Let's reimplement _write with filtered list.
+    
+    valid_accounts_data = []
+    current_data = await db.accounts._read()
+    for doc in current_data:
+        if doc["account_id"] in config_ids:
+            valid_accounts_data.append(doc)
+    
+    if len(valid_accounts_data) < len(current_data):
+        await db.accounts._write(valid_accounts_data)
+        print("Cleaned up stale accounts.")
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    """
+    Dashboard to view accounts and login status.
+    """
+    accounts_data = await db.accounts.find({})
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "accounts": accounts_data,
+        "master_id": config.MASTER_USER_ID
+    })
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)
