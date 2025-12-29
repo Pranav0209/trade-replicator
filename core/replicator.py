@@ -10,12 +10,34 @@ import uuid
 import config
 import math # Added for math.floor
 
+import json
+import os
+
 # --- GLOBAL STRATEGY STATE ---
-STRATEGY_STATE = {
-    "active": False,
-    "frozen_ratio": None,
-    "master_initial_margin": None
-}
+STATE_FILE = "data/strategy_state.json"
+
+def load_strategy_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[Strategy] Failed to load state: {e}")
+    return {
+        "active": False,
+        "frozen_ratio": None,
+        "master_initial_margin": None
+    }
+
+def save_strategy_state(state):
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"[Strategy] Failed to save state: {e}")
+
+STRATEGY_STATE = load_strategy_state()
+print(f"[Strategy] Loaded State: Active={STRATEGY_STATE['active']}")
 
 async def replicate_order(master_account_id: str, child_account_ids: list, **kwargs):
     """
@@ -265,6 +287,7 @@ async def execute_entry(master_id: str, allocation_pct: float, orders: list, mas
     if not STRATEGY_STATE["active"]:
         STRATEGY_STATE["active"] = True
         print("[Strategy] State set to ACTIVE.")
+        save_strategy_state(STRATEGY_STATE)
 
 async def execute_exit(master_id: str, exit_ratio: float, orders: list):
     """
@@ -389,6 +412,7 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
         STRATEGY_STATE["active"] = False
         STRATEGY_STATE["frozen_ratio"] = None
         STRATEGY_STATE["master_initial_margin"] = None
+        save_strategy_state(STRATEGY_STATE)
 
 async def get_order_status(account_id: str, order_id: str) -> dict:
     """

@@ -16,7 +16,10 @@ A robust, margin-based trade replication system designed for Zerodha KiteConnect
 *   **Safety First**:
     *   Positions in the Master account are *observed* but replication is event-driven.
     *   Strict checks to ensure Children only exit when Master exits (100% exit = State Reset).
-*   **Persisted State**: JSON-based storage for accounts and updated order logs (`data/`).
+*   **Persisted State**:
+    *   **Strategy State**: The "Frozen Ratio" is saved to disk (`data/strategy_state.json`) immediately upon creation.
+    *   **Resilience**: The system can be restarted (e.g., over the weekend) and will resume the active strategy with the correct ratio on Monday.
+    *   **Data**: Accounts and Order Logs are JSON-based and persistent.
 
 ## 🛠️ Architecture
 
