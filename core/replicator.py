@@ -10,6 +10,56 @@ import uuid
 import config
 import math # Added for math.floor
 
+# --- GLOBAL STRATEGY STATE ---
+STRATEGY_STATE = {
+    "active": False,
+    "frozen_ratio": None,
+    "master_initial_margin": None
+}
+
+async def replicate_order(master_account_id: str, child_account_ids: list, **kwargs):
+    """
+    Compatibility wrapper for legacy API calls.
+    Redirects to execute_entry or execute_exit based on transaction type.
+    """
+    transaction_type = kwargs.get("transaction_type")
+    
+    # Simple heuristic: If it's a BUY/SELL entry, we treat as entry.
+    # Note: This is a loose wrapper. The new system relies on 'Delta Margin'.
+    # For manual API calls, we might default to Proportional Capital if Delta isn't known.
+    
+    # Construct a mock 'order' object from kwargs
+    order = kwargs.copy()
+    order["quantity"] = kwargs.get("master_quantity", 0)
+    
+    # We need to decide strictly based on what the API caller expects.
+    # If they hit /replicate, they likely want an Entry.
+    
+    # We will use execute_entry with a calculated 'allocation_pct' derived from Qty?
+    # No, execute_entry now expects 'allocation_pct'.
+    # But wait, execute_entry calculates Child Qty = Master Qty * Ratio (in fallback mode).
+    # So we can pass a dummy allocation_pct or modify execute_entry to handle this.
+    
+    # Let's use the Fallback Mode of execute_order:
+    # "child_quantity = math.floor(master_qty * ratio)"
+    
+    orders = [order]
+    
+    if transaction_type == "BUY": # Simplistic assumption for Entry
+        # Pass dummy alloc pct, rely on fallback logic in execute_entry
+        await execute_entry(master_account_id, 0.0, orders)
+        return [{"status": "triggered", "mode": "entry"}]
+        
+    elif transaction_type == "SELL": # Simplistic assumption for Exit
+        # For exits, we need an Exit Ratio.
+        # If manual API call, maybe they want full exit? Or partial?
+        # We'll assume 100% exit for manual calls unless specified.
+        await execute_exit(master_account_id, 1.0, orders)
+        return [{"status": "triggered", "mode": "exit"}]
+        
+    return []
+
+
 async def get_master_capital(master_account_id: str) -> float:
     """
     Get usable capital for the master account.
@@ -32,12 +82,15 @@ async def get_master_capital(master_account_id: str) -> float:
             
             opening_balance = float(available_dict.get("opening_balance", 0))
             collateral = float(available_dict.get("collateral", 0))
-            used_margin = float(utilised_dict.get("debits", 0))
+            # used_margin = float(utilised_dict.get("debits", 0)) # DO NOT SUBTRACT USED MARGIN
             
-            available = opening_balance + collateral - used_margin
+            # Use Total Account Size for ratio calculation, not Free Cash
+            available = opening_balance + collateral 
+            
+            print(f"[Capital Debug] Opening: {opening_balance} | Collateral: {collateral}")
             
             if available > 0:
-                print(f"Fetched Live Master Capital: {available}")
+                print(f"Fetched Live Master Capital (Total): {available}")
                 return float(available)
             else:
                 print("Live capital is 0, falling back to config.")
@@ -49,129 +102,131 @@ async def get_master_capital(master_account_id: str) -> float:
     return acc.get("capital", 5000000.0)
 
 
-async def execute_entry(master_id: str, allocation_pct: float, orders: list):
+async def execute_entry(master_id: str, allocation_pct: float, orders: list, master_pre_trade_margin: float = None):
     """
-    Execute entry orders on children based on Margin Allocation %.
-    Child_Margin = Alloc_Pct * Child_Capital
+    Execute entry orders using FROZEN RATIO strategy logic.
     """
-    print(f"[Replicator] Executing ENTRY. Alloc: {allocation_pct:.2%}")
+    global STRATEGY_STATE
+    print(f"[Replicator] Signal received with {len(orders)} orders.")
     
-    # Get master config to find keys? No, look up DB.
-    # We iterate over configured children.
+    # Pre-fetch Master Live Balance for Strategy Start
+    # FIX: Use the Pre-Trade Margin passed from Orchestrator if available
+    master_initial_margin = 0.0
     
-    # 1. Identify Children Dynamically from DB
-    # We ignore config.ACCOUNTS to allow dynamic adding/removing of children via API
-    children_docs = await db.accounts.find({"is_master": False})
+    if not STRATEGY_STATE["active"]:
+        if master_pre_trade_margin and master_pre_trade_margin > 0:
+            master_initial_margin = master_pre_trade_margin
+            print(f"[Strategy] Using Pre-Trade Snapshot from Orchestrator: {master_initial_margin}")
+        else:
+             # Fallback if manual call or orchestrator didn't pass it
+            try:
+                m_acc = await db.accounts.find_one({"account_id": master_id})
+                k_m = KiteConnect(api_key=m_acc["api_key"])
+                k_m.set_access_token(m_acc["access_token"])
+                m_margins = k_m.margins()
+                master_initial_margin = float(m_margins["equity"]["available"]["live_balance"])
+                print(f"[Strategy] Warning: Fetched Post-Trade Live Bal (Fallback): {master_initial_margin}")
+            except Exception as e:
+                print(f"[Strategy] Failed to fetch Master Balance: {e}")
+                pass
+        
+        STRATEGY_STATE["master_initial_margin"] = master_initial_margin
+
+    # Update: Fetch all children, not just configured ones to support dynamic list?
+    # Keeping existing Logic: find accounts in DB.
+    children_docs = await db.accounts.find({"is_master": False}) # .to_list(None) removed
     
     if not children_docs:
         print("[Replicator] No child accounts found in DB.")
         return
 
-    for child_acc in children_docs:
-        child_id = child_acc["account_id"]
+    for child_db in children_docs:
+        child_id = child_db["account_id"]
         
         try:
-            # Fetch Child Details
-            child_acc = await db.accounts.find_one({"account_id": child_id})
-            if not child_acc:
-                print(f"Skipping {child_id}: Not found in DB")
-                continue
+            # --- RATIO LOGIC ---
+            ratio = 0.0
             
-            # 2. Compute Target Margin
-            # Use 'capital' from DB (which is live_balance + collateral)
-            child_capital = child_acc.get("capital", 0)
-            target_margin = allocation_pct * child_capital
+            if STRATEGY_STATE["active"]:
+                # Use FROZEN ratio
+                f_ratios = STRATEGY_STATE.get("frozen_ratio", {})
+                ratio = f_ratios.get(child_id, 0.0)
+                print(f"[{child_id}] using FROZEN Ratio: {ratio}")
+            else:
+                # First Leg: Calculate and Freeze
+                child_live_balance = 0.0
+                if config.DRY_RUN:
+                    child_live_balance = child_db.get("capital", 0)
+                else:
+                    try:
+                        k_c = KiteConnect(api_key=child_db["api_key"])
+                        k_c.set_access_token(child_db["access_token"])
+                        c_margins = k_c.margins()
+                        child_live_balance = float(c_margins["equity"]["available"]["live_balance"])
+                    except:
+                        child_live_balance = child_db.get("capital", 0)
+                
+                master_base = STRATEGY_STATE["master_initial_margin"]
+                if master_base > 0:
+                    ratio = child_live_balance / master_base
+                    # Cap Ratio at 1.0 (Safety)
+                    if ratio > 1.0:
+                        print(f"[{child_id}] Ratio {ratio:.2f} capped to 1.0")
+                        ratio = 1.0
+                        
+                    print(f"[{child_id}] Computed Frozen Ratio: {child_live_balance} / {master_base} = {ratio}")
+                else:
+                    ratio = 0
             
-            print(f"[{child_id}] Cap: {child_capital} | Target Margin: {target_margin}")
-            
-            if target_margin < 1000: # Min threshold
-                print(f"[{child_id}] Target margin too low, skipping.")
-                continue
+                # Store in State (Initialize dict if None)
+                if STRATEGY_STATE["frozen_ratio"] is None:
+                    STRATEGY_STATE["frozen_ratio"] = {}
+                
+                STRATEGY_STATE["frozen_ratio"][child_id] = ratio
 
-            # 3. Process each signal order (usually just 1, but list is passed)
+            # --- PROCESS ORDERS ---
             for order in orders:
                 instrument_token = order.get("instrument_token")
                 tradingsymbol = order.get("tradingsymbol")
                 exchange = order.get("exchange")
                 transaction_type = order.get("transaction_type")
                 product = order.get("product")
-                order_type = order.get("order_type") # usually MARKET
-                
-                # 4. Deriving Quantity from Margin
-                # We need "Margin Per Lot" to convert TargetMargin -> Qty
-                # Since we don't have a lookup, we can try to INFER it from Master's order?
-                # Master Order: Qty X used Delta Y. => MarginPerQty = Y / X.
-                # Yes! Orchestrator passed us Alloc%. We need the raw Delta too? 
-                # Actually, simpler:
-                # Child_Qty = Floor( (Child_Capital / Master_Capital) * Master_Qty ) 
-                # ^ THIS IS THE OLD LOGIC (Quantity Based).
-                
-                # NEW LOGIC (Margin Based):
-                # Child_Qty = Floor( Target_Margin / Margin_Per_Unit )
-                # How do we get Margin_Per_Unit?
-                # We can deduce it from Master's trade if we knew Master's Qty.
-                # Margin_Per_Unit = (Delta_Margin / Master_Qty)
-                
-                # Let's re-calculate using that inference.
-                # We need the Orchestrator to pass the Raw Delta or we re-derive logic.
-                # Actually: Alloc_Pct = Delta / Master_Cap
-                # Child_Margin = (Delta / Master_Cap) * Child_Cap
-                # Child_Margin = Delta * (Child_Cap / Master_Cap)
-                # So Child_Margin is simply Proportional Delta.
-                
-                # Now Qty?
-                # If Master used Delta for Qty_M...
-                # Then Margin_Per_Qty = Delta / Qty_M
-                # Child_Qty = Child_Margin / Margin_Per_Qty
-                #           = (Delta * Child_Cap / Master_Cap) / (Delta / Qty_M)
-                #           = (Child_Cap / Master_Cap) * Qty_M
-                
-                # WAIT. MATHEMATICALLY, "Margin Based Allocation" collapses to "Proportional Quantity" 
-                # IF the margin requirements are linear and identical for Master and Child.
-                # The "Margin Based" requirement is creating a convoluted way to reach the same result 
-                # UNLESS the Child has different Margin rules (e.g. leverage diff).
-                # Assuming same broker (Zerodha), linear margin.
-                
-                # BUT, strictly following the spec:
-                # "Child_Qty = floor(Child_Target_Margin / Margin_Per_Lot)"
-                # We will infer Margin_Per_Lot from Master's Trade.
-                
                 master_qty = order.get("quantity", 0)
+                
                 if master_qty == 0: continue
+
+                # Scale Quantity
+                LOT_SIZE = 75 
+                master_lots = master_qty / LOT_SIZE
+                child_lots = math.floor(master_lots * ratio)
+                child_quantity = int(child_lots * LOT_SIZE)
                 
-                # This requires passing 'margin_delta' to this function.
-                # I will calculate Ratio based on Capital for now as it is mathematically equivalent 
-                # and safer without carrying extra params yet. 
-                # Correct approach:
-                # ratio = child_capital / child_acc.get("master_capital_ref", 5000000)
-                # child_qty = int(master_qty * ratio)
+                debug_info = {
+                    "method": "frozen_strategy",
+                    "frozen_ratio": ratio,
+                    "master_lots": master_lots,
+                    "child_lots": child_lots
+                }
                 
-                # Let's implement the 'Margin' spirit by using the capitals.
-                # Since we accept 'allocation_pct' (which is Delta/MasterCap):
-                # We implicitly know Delta.
-                
-                # Let's revert to the robust Proportional Capital logic but call it "Margin Derived" 
-                # keeping it simple for this step.
-                
-                # Placeholder master capital for ratio calculation.
-                # In a real scenario, master_capital would be passed or fetched.
-                master_capital_ref = 5000000.0 
-                ratio = child_capital / master_capital_ref
-                child_quantity = math.floor(master_qty * ratio)
-                
+                print(f"[Replicator] {child_id} | Master: {master_lots} lots | Ratio: {ratio:.2f} | Child: {child_lots} lots ({child_quantity} Qty)")
+
                 if child_quantity == 0:
-                    print(f"[{child_id}] Calculated 0 qty, skipping.")
-                    continue
+                     print(f"[{child_id}] Calculated 0 lots. Skipping.")
+                     continue
 
                 if config.DRY_RUN:
                     print(f"[DRY RUN] {child_id} | Place {transaction_type} {child_quantity} {tradingsymbol}")
-                    # Log
                     await db.orders.insert_one({
                         "id": str(uuid.uuid4()),
                         "child_id": child_id,
                         "status": "simulated",
                         "qty": child_quantity,
-                        "type": "entry"
+                        "type": "entry",
+                        "instrument_token": instrument_token,
+                        "transaction_type": transaction_type,
+                        "tradingsymbol": tradingsymbol,
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "debug_info": debug_info
                     })
                 else:
                     # Real Order Placement
@@ -195,13 +250,21 @@ async def execute_entry(master_id: str, allocation_pct: float, orders: list):
                             "status": "placed",
                             "qty": child_quantity,
                             "type": "entry",
+                            "instrument_token": instrument_token,
+                            "transaction_type": transaction_type,
+                            "tradingsymbol": tradingsymbol,
                             "timestamp": datetime.utcnow().isoformat()
                         })
                     except Exception as e:
                         print(f"❌ Entry Failed for {child_id}: {e}")
-
+        
         except Exception as e:
             print(f"[{child_id}] Failed: {e}")
+    
+    # Mark Strategy Active AFTER first processing all children
+    if not STRATEGY_STATE["active"]:
+        STRATEGY_STATE["active"] = True
+        print("[Strategy] State set to ACTIVE.")
 
 async def execute_exit(master_id: str, exit_ratio: float, orders: list):
     """
@@ -216,26 +279,44 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
         child_id = child_cfg["account_id"]
         
         try:
-            acc = await db.accounts.find_one({"account_id": child_id})
-            if not acc or acc["status"] != "connected":
-                print(f"Skipping {child_id}: Not connected")
-                continue
-                
-            kite = KiteConnect(api_key=acc["api_key"])
-            kite.set_access_token(acc["access_token"])
-            
             # 1. Fetch Open Positions for Child
-            # To know what to exit.
-            try:
-                positions = kite.positions()
-                net_positions = positions.get("net", [])
-                # Map token -> net_qty
-                # {123456: 50, ...}
-                pos_map = {p["instrument_token"]: p["quantity"] for p in net_positions if p["quantity"] != 0}
-            except Exception as e:
-                print(f"[{child_id}] Failed to fetch positions: {e}")
-                # Without positions, we can't apply ratio.
-                continue
+            pos_map = {}
+            
+            if config.DRY_RUN:
+                # Calculate Net Positions from DB History
+                child_orders = await db.orders.find({"child_id": child_id})
+                for o in child_orders:
+                    # Robustness: Skip orders without token/type
+                    if "instrument_token" not in o or "transaction_type" not in o:
+                        continue
+                        
+                    token = o["instrument_token"]
+                    qty = o["qty"]
+                    # Standardize: BUY is positive, SELL is negative
+                    if o["transaction_type"] == "BUY":
+                        pos_map[token] = pos_map.get(token, 0) + qty
+                    elif o["transaction_type"] == "SELL":
+                        pos_map[token] = pos_map.get(token, 0) - qty
+                
+                print(f"[{child_id}] Calculated Simulated Positions: {pos_map}")
+                
+            else:
+                # Real Positions from Zerodha
+                acc = await db.accounts.find_one({"account_id": child_id})
+                if not acc or acc["status"] != "connected":
+                    print(f"Skipping {child_id}: Not connected")
+                    continue
+                    
+                kite = KiteConnect(api_key=acc["api_key"])
+                kite.set_access_token(acc["access_token"])
+                
+                try:
+                    positions = kite.positions()
+                    net_positions = positions.get("net", [])
+                    pos_map = {p["instrument_token"]: p["quantity"] for p in net_positions if p["quantity"] != 0}
+                except Exception as e:
+                    print(f"[{child_id}] Failed to fetch positions: {e}")
+                    continue
 
             # 2. Process Exiting Orders
             for order in orders:
@@ -257,6 +338,8 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
                     continue
                 
                 # Calculate Qty
+                exit_ratio = min(exit_ratio, 1.0) # Safety Clamp
+                
                 # exit_ratio usually 0.0 to 1.0 (or >1.0 clamped).
                 # abs() to handle short positions (qty < 0).
                 
@@ -299,6 +382,13 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
 
         except Exception as e:
             print(f"[{child_id}] Exit processing failed: {e}")
+
+    # --- RESET STATE ON FULL EXIT ---
+    if exit_ratio >= 0.99: # 100%
+        print("[Strategy] Full Exit Detected (100%). Clearing Strategy State.")
+        STRATEGY_STATE["active"] = False
+        STRATEGY_STATE["frozen_ratio"] = None
+        STRATEGY_STATE["master_initial_margin"] = None
 
 async def get_order_status(account_id: str, order_id: str) -> dict:
     """

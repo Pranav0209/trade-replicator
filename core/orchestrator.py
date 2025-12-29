@@ -122,7 +122,8 @@ class MarginOrchestrator:
                     await execute_entry(
                         master_id=self.master_id, 
                         allocation_pct=allocation_pct, 
-                        orders=new_orders
+                        orders=new_orders,
+                        master_pre_trade_margin=self._last_margin
                     )
             
             elif margin_delta < 0:
