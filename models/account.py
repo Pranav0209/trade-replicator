@@ -15,7 +15,10 @@ class AccountResponse(BaseModel):
     request_token: Optional[str] = None
     status: str              # "pending" | "connected"
     linked_at: Optional[datetime] = None
-    children: List[str] = []  # List of child account IDs
+    max_capital_usage: float = 0.0
+
+class UpdateAccountIn(BaseModel):
+    max_capital_usage: Optional[float] = None
 
 class FundsResponse(BaseModel):
     account_id: str

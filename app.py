@@ -1,5 +1,6 @@
 import os
 from fastapi import FastAPI, Request
+from datetime import datetime, timezone, timedelta
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
@@ -15,6 +16,56 @@ app = FastAPI(title="PMS Trading Skeleton")
 
 # Setup Templates
 templates = Jinja2Templates(directory="templates")
+
+def format_datetime(value):
+    if not value: return "-"
+    try:
+        # Value is naive UTC string from datetime.utcnow().isoformat()
+        # e.g. "2023-12-30T10:52:15.123456"
+        dt = datetime.fromisoformat(str(value).replace('Z', ''))
+        
+        # Treat as UTC
+        dt = dt.replace(tzinfo=timezone.utc)
+        
+        # Convert to IST (UTC + 5:30)
+        ist = timezone(timedelta(hours=5, minutes=30))
+        dt_ist = dt.astimezone(ist)
+        
+        return dt_ist.strftime("%b %d, %I:%M %p")
+    except Exception as e:
+        return value
+
+templates.env.filters["datetime"] = format_datetime
+
+def format_inr(number):
+    """Format number in Indian Rupee format (e.g. 1,00,000)"""
+    if number is None: return "₹0"
+    try:
+        s = str(int(float(number)))
+        if len(s) <= 3:
+            return "₹" + s
+        
+        last_three = s[-3:]
+        remaining = s[:-3]
+        
+        # Add commas every 2 digits for the remaining part (reversed)
+        # e.g. 1234 -> 1,234 (handled by last_three but for larger logic)
+        # 123456 -> 1,23,456
+        
+        formatted_remaining = ""
+        while len(remaining) > 0:
+            if len(remaining) > 2:
+                formatted_remaining = "," + remaining[-2:] + formatted_remaining
+                remaining = remaining[:-2]
+            else:
+                formatted_remaining = remaining + formatted_remaining
+                remaining = ""
+                
+        return "₹" + formatted_remaining + "," + last_three
+    except:
+        return f"₹{number}"
+
+templates.env.filters["inr"] = format_inr
 
 # Include routers
 app.include_router(auth.router, prefix="/auth", tags=["auth"])

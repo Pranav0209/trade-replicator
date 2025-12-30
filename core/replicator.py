@@ -188,6 +188,13 @@ async def execute_entry(master_id: str, allocation_pct: float, orders: list, mas
                     except:
                         child_live_balance = child_db.get("capital", 0)
                 
+                # --- Capital Usage Limit Logic ---
+                max_cap = child_db.get("max_capital_usage", 0)
+                if max_cap > 0 and child_live_balance > max_cap:
+                    print(f"[{child_id}] Capping Capital Usage: {child_live_balance} -> {max_cap}")
+                    child_live_balance = max_cap
+                # ---------------------------------
+                
                 master_base = STRATEGY_STATE["master_initial_margin"]
                 if master_base > 0:
                     ratio = child_live_balance / master_base

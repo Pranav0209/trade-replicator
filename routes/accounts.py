@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from datetime import datetime
 from kiteconnect import KiteConnect
 from db.storage import db
-from models.account import LinkAccountIn, AccountResponse, FundsResponse
+from models.account import LinkAccountIn, AccountResponse, FundsResponse, UpdateAccountIn
 
 router = APIRouter()
 
@@ -90,8 +90,30 @@ async def get_account(account_id: str) -> AccountResponse:
         request_token="***" if acc.get("request_token") else None,
         status=acc["status"],
         linked_at=acc.get("linked_at"),
-        children=acc.get("children", [])
+        children=acc.get("children", []),
+        max_capital_usage=acc.get("max_capital_usage", 0.0)
     )
+
+@router.put("/{account_id}")
+async def update_account(account_id: str, body: UpdateAccountIn):
+    """
+    Update account configuration.
+    """
+    acc = await db.accounts.find_one({"account_id": account_id})
+    if not acc:
+        raise HTTPException(404, f"Account {account_id} not found")
+    
+    updates = {}
+    if body.max_capital_usage is not None:
+        updates["max_capital_usage"] = body.max_capital_usage
+        
+    if updates:
+        await db.accounts.update_one(
+            {"account_id": account_id},
+            {"$set": updates}
+        )
+        
+    return {"status": "ok", "account_id": account_id}
 
 @router.get("/{account_id}/funds")
 async def get_funds(account_id: str) -> FundsResponse:
