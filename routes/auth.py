@@ -106,11 +106,7 @@ async def callback(request_token: str, account_id: str = None, state: str = None
             }
         )
         
-        return {
-            "status": "success",
-            "message": f"User {effective_account_id} authenticated successfully!",
-            "account_id": effective_account_id
-        }
+        return RedirectResponse(url="/")
     except Exception as e:
         raise HTTPException(500, f"Database update failed: {e}")
 
