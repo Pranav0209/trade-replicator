@@ -55,6 +55,19 @@ class MarginOrchestrator:
             print(f"[Orchestrator] Initialization failed: {e}")
             raise e
 
+    async def _master_is_flat(self, kite) -> bool:
+        """Check if master account has zero open positions."""
+        try:
+            positions = kite.positions()
+            net = positions.get("net", [])
+            is_flat = all(p["quantity"] == 0 for p in net)
+            if is_flat:
+                print("[Orchestrator] Verification: Master is FLAT (0 Open Positions).")
+            return is_flat
+        except Exception as e:
+            print(f"[Orchestrator] Failed to check positions: {e}")
+            return False
+
     async def process_tick(self, new_orders: List[dict]):
         """
         Main polling hook.
@@ -134,6 +147,24 @@ class MarginOrchestrator:
                 # Identify instruments exiting
                 # assumption: new_orders contains the exit orders
                 exiting_orders = new_orders 
+                
+                # --- CRITICAL SAFETY: FULL EXIT CHECK ---
+                # Margin calculation fails in loss scenarios (Ratio < 100% even if full exit).
+                # Force 100% exit if Master is legally flat.
+                if await self._master_is_flat(kite):
+                    print("[Orchestrator] 🚨 Master is FLAT. Forcing 100% Exit (Ignoring Margin Delta).")
+                    await execute_exit(
+                        master_id=self.master_id,
+                        exit_ratio=1.0,
+                        orders=exiting_orders
+                    )
+                    # Clear map as we are fully flat
+                    self._instrument_map.clear()
+                    # Update baseline and return early
+                    self._last_margin = live_balance
+                    return
+                # ----------------------------------------
+                
                 if not exiting_orders:
                     print("[Orchestrator] Exit detected but no orders found? (Maybe delayed update)")
                 else:

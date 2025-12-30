@@ -15,12 +15,13 @@ A robust, margin-based trade replication system designed for Zerodha KiteConnect
   - No hardcoded configuration for child accounts. Simply link an account via the API.
   - **Max Capital Usage**: Configure a specific maximum capital limit per child account directly from the UI. The replicator expects this limit when calculating ratios (`min(Available, Max_Cap)`).
 - **UI Dashboard**:
-  - **Live Status**: Monitor connection status and capital usage.
+  - **Real-Time Wiring**: Monitor connection status and capital usage.
   - **Quick Actions**: Edit capital limits and manage logins per account.
+  - **Connection Doctor**: Auto-verifies access tokens on page load using live API calls (`kite.profile()`). Alerts with **LOGIN REQ** if disconnected.
   - **Smart Formatting**: Auto-converts timestamps to local time (IST) and currency to Indian numbering format (₹1,00,000).
 - **Safety First**:
   - Positions in the Master account are _observed_ but replication is event-driven.
-  - Strict checks to ensure Children only exit when Master exits (100% exit = State Reset).
+  - **Zero Position Enforcement**: If the Master account is detected as "Flat" (0 open positions), the system calculates a **100% Exit Ratio** for all children immediately, bypassing any margin delta logic. This guarantees no orphan positions in loss scenarios.
 - **Persisted State**:
   - **Strategy State**: The "Frozen Ratio" is saved to disk (`data/strategy_state.json`) immediately upon creation.
   - **Resilience**: The system can be restarted (e.g., over the weekend) and will resume the active strategy with the correct ratio on Monday.
@@ -118,6 +119,15 @@ pms-trading/
 │   ├── orchestrator.py     # Master Monitor & Pre-Trade Snapshotting
 │   └── replicator.py       # Child Execution & Strategy State
 ├── data/                   # JSON Database (accounts, orders)
+├── db/                     # DB Connection Layer
+│   └── storage.py          # JSONStore Implementation
+├── models/                 # Pydantic Models
+│   └── account.py          # Account & Request Models
 ├── routes/                 # API Routes
+│   ├── accounts.py         # Account Management
+│   ├── auth.py             # Authentication & Token Management
+│   └── trading.py          # Manual Trade Execution
+├── templates/              # Frontend
+│   └── index.html          # Dashboard UI
 └── get_master_positions.py # Utility script
 ```

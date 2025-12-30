@@ -46,6 +46,11 @@
         font-weight: bold;
       }
 
+      .status-expired {
+        color: #ff3b30;
+        font-weight: bold;
+      }
+
       .btn {
         display: inline-block;
         padding: 8px 16px;
@@ -176,9 +181,10 @@
               {% endif %}
             </td>
             <td
-              class="{{ 'status-connected' if acc.status == 'connected' else 'status-pending' }}"
+              class="{{ 'status-connected' if acc.status == 'connected' else 'status-expired' if acc.status == 'expired' else 'status-pending' }}"
             >
-              {{ acc.status.upper() }}
+              {{ 'LOGIN REQ' if acc.status == 'expired' else acc.status.upper()
+              }}
             </td>
             <td>{{ acc.last_updated | datetime }}</td>
             <td>

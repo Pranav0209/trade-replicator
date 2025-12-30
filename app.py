@@ -1,9 +1,10 @@
-import os
 from fastapi import FastAPI, Request
 from datetime import datetime, timezone, timedelta
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
+from kiteconnect import KiteConnect
+import asyncio
 from dotenv import load_dotenv
 import config
 
@@ -144,8 +145,36 @@ async def startup():
 async def dashboard(request: Request):
     """
     Dashboard to view accounts and login status.
+    Uses real-time Kite Profile check to verify token validity.
     """
     accounts_data = await db.accounts.find({})
+    
+    # Helper: Validate specific account
+    async def validate_account(acc):
+        if not acc.get("access_token") or acc.get("status") != "connected":
+            return False
+            
+        try:
+            # We run the synchronous Kite call in a separate thread to avoid blocking
+            loop = asyncio.get_event_loop()
+            k = KiteConnect(api_key=acc["api_key"])
+            k.set_access_token(acc["access_token"])
+            
+            # If this succeeds, token is valid
+            await loop.run_in_executor(None, k.profile)
+            return True
+        except Exception as e:
+            # Token invalid or network error
+            return False
+
+    # Run validations in parallel
+    validation_results = await asyncio.gather(*(validate_account(acc) for acc in accounts_data))
+    
+    # Update statuses for display
+    for acc, is_valid in zip(accounts_data, validation_results):
+        if acc.get("status") == "connected" and not is_valid:
+             acc["status"] = "expired"
+
     return templates.TemplateResponse("index.html", {
         "request": request,
         "accounts": accounts_data,

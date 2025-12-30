@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from starlette.responses import RedirectResponse
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from kiteconnect import KiteConnect
 from db.storage import db
 import json
@@ -100,7 +100,8 @@ async def callback(request_token: str, account_id: str = None, state: str = None
                     "request_token": request_token,
                     "status": "connected",
                     "capital": live_capital,
-                    "last_updated": datetime.utcnow().isoformat()
+                    "last_updated": datetime.utcnow().isoformat(),
+                    "token_date": datetime.now(timezone(timedelta(hours=5, minutes=30))).date().isoformat()
                 }
             }
         )
