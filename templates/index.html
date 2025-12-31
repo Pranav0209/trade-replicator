@@ -217,10 +217,28 @@
         <li>
           Ensure all accounts show
           <span class="status-connected">CONNECTED</span> before starting the
-          polling service.
         </li>
       </ol>
     </div>
+
+    <div class="card">
+      <h3>System Controls</h3>
+      <p>Use these actions to manage the replication engine state.</p>
+      <div class="action-buttons">
+        <button
+          onclick="confirmResetStrategy()"
+          class="btn"
+          style="background-color: #ff3b30"
+        >
+          Reset Strategy State
+        </button>
+      </div>
+      <small style="color: #666; margin-top: 8px; display: block">
+        * Clears the "Frozen Ratio" and resets the cycle. Use this at the start
+        of a new trade cycle (e.g., Wednesday morning).
+      </small>
+    </div>
+
     <!-- Edit Modal -->
     <div id="editModal" class="modal">
       <div class="modal-content">
@@ -263,6 +281,30 @@
 
       function closeModal() {
         document.getElementById("editModal").style.display = "none";
+      }
+
+      async function confirmResetStrategy() {
+        if (
+          confirm(
+            "Are you sure you want to RESET the Strategy State?\n\nThis will clear the current 'Frozen Ratio' and is irreversible.\nOnly do this if you are starting a fresh trade cycle."
+          )
+        ) {
+          try {
+            const response = await fetch("/trading/reset-strategy", {
+              method: "POST",
+            });
+
+            if (response.ok) {
+              alert("Strategy State has been reset successfully.");
+              location.reload();
+            } else {
+              alert("Failed to reset strategy.");
+            }
+          } catch (e) {
+            console.error(e);
+            alert("Error calling reset endpoint.");
+          }
+        }
       }
 
       async function saveAccount() {

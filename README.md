@@ -17,6 +17,7 @@ A robust, margin-based trade replication system designed for Zerodha KiteConnect
 - **UI Dashboard**:
   - **Real-Time Wiring**: Monitor connection status and capital usage.
   - **Quick Actions**: Edit capital limits and manage logins per account.
+  - **System Controls**: **Reset Strategy** button to manually clear the strategy state at the start of a new trade cycle or to fix state inconsistencies.
   - **Connection Doctor**: Auto-verifies access tokens on page load using live API calls (`kite.profile()`). Alerts with **LOGIN REQ** if disconnected.
   - **Smart Formatting**: Auto-converts timestamps to local time (IST) and currency to Indian numbering format (₹1,00,000).
 - **Safety First**:
@@ -85,6 +86,8 @@ The UI (`http://127.0.0.1:8000`) provides real-time control:
 - **Max Cap Usage**: Click "Edit" on any child account to set a hard limit on capital deployment.
   - _Example_: Child has ₹10L but you only want to use ₹5L for replication. Set Max Cap to 500000.
   - The "Frozen Ratio" will be calculated using ₹5L instead of ₹10L.
+- **System Controls**:
+  - **Reset Strategy State**: Use this button at the start of a new trade cycle (e.g., Wednesday) to clear the previous "Frozen Ratio". This ensures the new cycle starts with a fresh snapshot of your current available capital.
 
 ## 🧠 Logic Deep Dive
 
@@ -105,7 +108,8 @@ To ensure complex multi-leg strategies (like Iron Condors) are replicated with p
 
 Exits are proportional to the Master's exit.
 
-- If Master exits 50% of their position, Child exits 50% of theirs.
+- If Master exits 50% of their position, Child exits 50% of theirs (Percentage Based).
+- **Why?** This ensures the system is self-correcting. If the Child has fewer lots than expected, it still closes the correct _proportion_ of its holdings, preventing "Short" positions or orphaned lots.
 - If Master exits 100%, Child exits 100% and the Strategy State resets.
 
 ## 📂 Directory Structure
