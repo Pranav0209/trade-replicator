@@ -39,6 +39,39 @@ def save_strategy_state(state):
 STRATEGY_STATE = load_strategy_state()
 print(f"[Strategy] Loaded State: Active={STRATEGY_STATE['active']}")
 
+def aggregate_orders(orders: list) -> list:
+    """
+    Aggregates split orders into single orders by Instrument + Transaction Type.
+    Prevents rounding losses (e.g. 4x 27 lots -> 1x 108 lots).
+    """
+    if not orders: return []
+    
+    agg_map = {}
+    
+    for order in orders:
+        # Key: (Instrument Token, Transaction Type, Product, Exchange)
+        key = (
+            order.get("instrument_token"),
+            order.get("transaction_type"),
+            order.get("product"),
+            order.get("exchange"),
+            order.get("tradingsymbol") 
+        )
+        
+        if key not in agg_map:
+            # Clone to separate object
+            agg_map[key] = order.copy()
+        else:
+            # Sum Quantity
+            agg_map[key]["quantity"] += order.get("quantity", 0)
+            
+    aggregated = list(agg_map.values())
+    
+    if len(orders) != len(aggregated):
+        print(f"[Replicator] Aggregated {len(orders)} orders into {len(aggregated)} unique positions.")
+        
+    return aggregated
+
 async def replicate_order(master_account_id: str, child_account_ids: list, **kwargs):
     """
     Compatibility wrapper for legacy API calls.
@@ -129,7 +162,9 @@ async def execute_entry(master_id: str, allocation_pct: float, orders: list, mas
     Execute entry orders using FROZEN RATIO strategy logic.
     """
     global STRATEGY_STATE
-    print(f"[Replicator] Signal received with {len(orders)} orders.")
+    # Pre-aggregate orders to prevent rounding loss
+    orders = aggregate_orders(orders)
+    print(f"[Replicator] Signal received with {len(orders)} orders (Aggregated).")
     
     # Pre-fetch Master Live Balance for Strategy Start
     # FIX: Use the Pre-Trade Margin passed from Orchestrator if available
@@ -225,7 +260,7 @@ async def execute_entry(master_id: str, allocation_pct: float, orders: list, mas
                 if master_qty == 0: continue
 
                 # Scale Quantity
-                LOT_SIZE = 75 
+                LOT_SIZE = 65 
                 master_lots = master_qty / LOT_SIZE
                 child_lots = math.floor(master_lots * ratio)
                 child_quantity = int(child_lots * LOT_SIZE)
@@ -302,6 +337,7 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
     Child_Exit_Qty = floor(Child_Open_Qty * Exit_Ratio)
     """
     print(f"[Replicator] Executing EXIT. Ratio: {exit_ratio:.2%}")
+    orders = aggregate_orders(orders)
     
     children_docs = await db.accounts.find({"is_master": False})
     
@@ -384,7 +420,17 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
                     exit_qty = abs(child_open_qty)
                     
                 print(f"[{child_id}] Open: {child_open_qty} | Ratio: {exit_ratio:.2f} | Exit Qty: {exit_qty}")
-                
+
+                # FIX: Updates usage tracking to prevent double counting if multiple orders for same token exist
+                # Decrement the available quantity for subsequent orders in this loop
+                if child_open_qty > 0:
+                     pos_map[instrument_token] = max(0, child_open_qty - exit_qty)
+                else:
+                     # Short position (negative qty), so we add (moving towards 0)
+                     # or properly: reduce the magnitude
+                     remainder = abs(child_open_qty) - exit_qty
+                     pos_map[instrument_token] = -remainder
+
                 if config.DRY_RUN:
                     print(f"[DRY RUN] {child_id} | Place {transaction_type} {exit_qty} {tradingsymbol}")
                     await db.orders.insert_one({
