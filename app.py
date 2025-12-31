@@ -13,7 +13,7 @@ load_dotenv()
 from db.storage import init_db, db
 from routes import accounts, trading, auth
 
-app = FastAPI(title="PMS Trading Skeleton")
+app = FastAPI(title="PMS Trade Replicator")
 
 # Setup Templates
 templates = Jinja2Templates(directory="templates")

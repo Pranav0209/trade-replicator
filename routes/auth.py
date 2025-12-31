@@ -11,7 +11,7 @@ router = APIRouter()
 async def login(account_id: str):
     """
     Redirect to Zerodha login using user's API key.
-    Usage: http://127.0.0.1:8000/auth/login?account_id=CAY950
+    Usage: http://127.0.0.1:8000/auth/login?account_id="....."
     """
     # Get user credentials from storage
     user = await db.accounts.find_one({"account_id": account_id})
