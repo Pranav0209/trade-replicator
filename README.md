@@ -116,6 +116,41 @@ Exits are proportional to the Master's exit.
 - **Why?** This ensures the system is self-correcting. If the Child has fewer lots than expected, it still closes the correct _proportion_ of its holdings, preventing "Short" positions or orphaned lots.
 - If Master exits 100%, Child exits 100% and the Strategy State resets.
 
+## 🔄 System Flow (Mental Map)
+
+The system operates in two parallel, non-blocking paths:
+
+### 1. The Replication Engine (`polling_service.py`)
+
+This is the core loop that runs independently of the UI.
+
+```
+polling_service.py
+ └─ fetch master orders + margins
+ └─ orchestrator.process_tick()
+     ├─ detect ENTRY / EXIT
+     ├─ snapshot pre-trade margin
+     ├─ verify master flat
+     └─ call replicator.execute_entry / execute_exit
+         ├─ aggregate orders
+         ├─ compute child quantities
+         ├─ enforce caps
+         ├─ place orders (or DRY_RUN)
+         └─ update strategy state (via core/strategy_state.py)
+```
+
+### 2. The Management Layer (`start.py`)
+
+This handles the UI and API, completely decoupled from trade execution.
+
+```
+start.py (API/UI)
+ ├─ auth/login
+ ├─ auth/callback
+ ├─ accounts config
+ └─ dashboard visibility
+```
+
 ## 📂 Directory Structure
 
 ```
@@ -125,7 +160,9 @@ pms-trading/
 ├── config.py               # Global constants
 ├── core/
 │   ├── orchestrator.py     # Master Monitor & Pre-Trade Snapshotting
-│   └── replicator.py       # Child Execution & Strategy State
+│   ├── replicator.py       # Child Execution Logic
+│   └── strategy_state.py   # State Persistence & Management (Decoupled)
+
 ├── data/                   # JSON Database (accounts, orders)
 ├── db/                     # DB Connection Layer
 │   └── storage.py          # JSONStore Implementation

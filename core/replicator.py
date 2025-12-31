@@ -1,4 +1,3 @@
-
 """
 Trade replication engine.
 Replicates master account orders to child accounts proportionally.
@@ -9,35 +8,9 @@ from datetime import datetime
 import uuid
 import config
 import math # Added for math.floor
-
 import json
 import os
-
-# --- GLOBAL STRATEGY STATE ---
-STATE_FILE = "data/strategy_state.json"
-
-def load_strategy_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"[Strategy] Failed to load state: {e}")
-    return {
-        "active": False,
-        "frozen_ratio": None,
-        "master_initial_margin": None
-    }
-
-def save_strategy_state(state):
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump(state, f, indent=2)
-    except Exception as e:
-        print(f"[Strategy] Failed to save state: {e}")
-
-STRATEGY_STATE = load_strategy_state()
-print(f"[Strategy] Loaded State: Active={STRATEGY_STATE['active']}")
+from core.strategy_state import state_manager
 
 def aggregate_orders(orders: list) -> list:
     """
@@ -79,36 +52,17 @@ async def replicate_order(master_account_id: str, child_account_ids: list, **kwa
     """
     transaction_type = kwargs.get("transaction_type")
     
-    # Simple heuristic: If it's a BUY/SELL entry, we treat as entry.
-    # Note: This is a loose wrapper. The new system relies on 'Delta Margin'.
-    # For manual API calls, we might default to Proportional Capital if Delta isn't known.
-    
     # Construct a mock 'order' object from kwargs
     order = kwargs.copy()
     order["quantity"] = kwargs.get("master_quantity", 0)
     
-    # We need to decide strictly based on what the API caller expects.
-    # If they hit /replicate, they likely want an Entry.
-    
-    # We will use execute_entry with a calculated 'allocation_pct' derived from Qty?
-    # No, execute_entry now expects 'allocation_pct'.
-    # But wait, execute_entry calculates Child Qty = Master Qty * Ratio (in fallback mode).
-    # So we can pass a dummy allocation_pct or modify execute_entry to handle this.
-    
-    # Let's use the Fallback Mode of execute_order:
-    # "child_quantity = math.floor(master_qty * ratio)"
-    
     orders = [order]
     
     if transaction_type == "BUY": # Simplistic assumption for Entry
-        # Pass dummy alloc pct, rely on fallback logic in execute_entry
         await execute_entry(master_account_id, 0.0, orders)
         return [{"status": "triggered", "mode": "entry"}]
         
     elif transaction_type == "SELL": # Simplistic assumption for Exit
-        # For exits, we need an Exit Ratio.
-        # If manual API call, maybe they want full exit? Or partial?
-        # We'll assume 100% exit for manual calls unless specified.
         await execute_exit(master_account_id, 1.0, orders)
         return [{"status": "triggered", "mode": "exit"}]
         
@@ -161,7 +115,6 @@ async def execute_entry(master_id: str, allocation_pct: float, orders: list, mas
     """
     Execute entry orders using FROZEN RATIO strategy logic.
     """
-    global STRATEGY_STATE
     # Pre-aggregate orders to prevent rounding loss
     orders = aggregate_orders(orders)
     print(f"[Replicator] Signal received with {len(orders)} orders (Aggregated).")
@@ -170,7 +123,7 @@ async def execute_entry(master_id: str, allocation_pct: float, orders: list, mas
     # FIX: Use the Pre-Trade Margin passed from Orchestrator if available
     master_initial_margin = 0.0
     
-    if not STRATEGY_STATE["active"]:
+    if not state_manager.is_active():
         if master_pre_trade_margin and master_pre_trade_margin > 0:
             master_initial_margin = master_pre_trade_margin
             print(f"[Strategy] Using Pre-Trade Snapshot from Orchestrator: {master_initial_margin}")
@@ -187,7 +140,7 @@ async def execute_entry(master_id: str, allocation_pct: float, orders: list, mas
                 print(f"[Strategy] Failed to fetch Master Balance: {e}")
                 pass
         
-        STRATEGY_STATE["master_initial_margin"] = master_initial_margin
+        state_manager.set_master_initial_margin(master_initial_margin)
 
     # Update: Fetch all children, not just configured ones to support dynamic list?
     # Keeping existing Logic: find accounts in DB.
@@ -204,10 +157,9 @@ async def execute_entry(master_id: str, allocation_pct: float, orders: list, mas
             # --- RATIO LOGIC ---
             ratio = 0.0
             
-            if STRATEGY_STATE["active"]:
+            if state_manager.is_active():
                 # Use FROZEN ratio
-                f_ratios = STRATEGY_STATE.get("frozen_ratio", {})
-                ratio = f_ratios.get(child_id, 0.0)
+                ratio = state_manager.get_frozen_ratio(child_id)
                 print(f"[{child_id}] using FROZEN Ratio: {ratio}")
             else:
                 # First Leg: Calculate and Freeze
@@ -230,8 +182,8 @@ async def execute_entry(master_id: str, allocation_pct: float, orders: list, mas
                     child_live_balance = max_cap
                 # ---------------------------------
                 
-                master_base = STRATEGY_STATE["master_initial_margin"]
-                if master_base > 0:
+                master_base = state_manager.get_master_initial_margin()
+                if master_base and master_base > 0:
                     ratio = child_live_balance / master_base
                     # Cap Ratio at 1.0 (Safety)
                     if ratio > 1.0:
@@ -243,10 +195,7 @@ async def execute_entry(master_id: str, allocation_pct: float, orders: list, mas
                     ratio = 0
             
                 # Store in State (Initialize dict if None)
-                if STRATEGY_STATE["frozen_ratio"] is None:
-                    STRATEGY_STATE["frozen_ratio"] = {}
-                
-                STRATEGY_STATE["frozen_ratio"][child_id] = ratio
+                state_manager.set_frozen_ratio(child_id, ratio)
 
             # --- PROCESS ORDERS ---
             for order in orders:
@@ -326,10 +275,8 @@ async def execute_entry(master_id: str, allocation_pct: float, orders: list, mas
             print(f"[{child_id}] Failed: {e}")
     
     # Mark Strategy Active AFTER first processing all children
-    if not STRATEGY_STATE["active"]:
-        STRATEGY_STATE["active"] = True
-        print("[Strategy] State set to ACTIVE.")
-        save_strategy_state(STRATEGY_STATE)
+    if not state_manager.is_active():
+        state_manager.activate()
 
 async def execute_exit(master_id: str, exit_ratio: float, orders: list):
     """
@@ -461,11 +408,7 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
 
     # --- RESET STATE ON FULL EXIT ---
     if exit_ratio >= 0.99: # 100%
-        print("[Strategy] Full Exit Detected (100%). Clearing Strategy State.")
-        STRATEGY_STATE["active"] = False
-        STRATEGY_STATE["frozen_ratio"] = None
-        STRATEGY_STATE["master_initial_margin"] = None
-        save_strategy_state(STRATEGY_STATE)
+        state_manager.clear()
 
 async def get_order_status(account_id: str, order_id: str) -> dict:
     """
