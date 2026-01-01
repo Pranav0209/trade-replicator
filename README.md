@@ -27,6 +27,11 @@ A robust, margin-based trade replication system designed for Zerodha KiteConnect
   - **Order Aggregation**: Automatically aggregates simultaneous split orders (e.g., Master splits 100 lots into 4x25) into a single virtual order before calculation. This eliminates rounding losses that occur when replicating small individual orders.
   - **Duplicate Exit Prevention**: Smart tracking of local position state ensures that multiple exit signals for the same instrument do not trigger duplicate exit orders on child accounts.
   - **Safe Lot Sizing**: Currently configured with explicit lot size safeguards (e.g., Nifty @ 65) to ensure integer lot calculations and prevent fractional order errors.
+  - **Margin Debounce**: Prevents "False Signals" caused by API race conditions (where Margin updates arrive milliseconds before the Order confirmation). If a significant margin drift is detected without a corresponding order, the system "holds" the baseline until the order arrives.
+- **Self-Healing Mechanisms**:
+  - **Active State Reconciliation**: If the service is restarted _after_ a manual exit, it detects the anomaly (Active Strategy + Flat Master) and triggers an emergency 100% Exit on children to sync state.
+  - **Zombie Map Reconciliation**: On every Exit event, the system cross-checks its internal memory against live Zerodha positions. It automatically purges "Phantom Tokens" (e.g., from previous missed exits), ensuring that the Exit Ratio is calculated against reality.
+  - **Clean Slate Initialization**: Restarts wipe the internal instrument map to prevent ghost data from persisting across sessions.
 - **Persisted State**:
   - **Strategy State**: The "Frozen Ratio" is saved to disk (`data/strategy_state.json`) immediately upon creation.
   - **Resilience**: The system can be restarted (e.g., over the weekend) and will resume the active strategy with the correct ratio on Monday.

@@ -6,6 +6,7 @@ from kiteconnect import KiteConnect
 import config
 from db.storage import db
 from core.replicator import execute_entry, execute_exit
+from core.strategy_state import state_manager
 
 class MarginOrchestrator:
     def __init__(self, master_user_id: str):
@@ -47,6 +48,8 @@ class MarginOrchestrator:
             # For now, let's use the DB stored capital as the 'BASE' for % calc.
             self._master_capital = live_balance # Use LIVE capital as base for % calculation for accuracy 
             
+            # Reset tracking map since we are establishing a new margin baseline
+            self._instrument_map.clear()
             self._last_margin = live_balance
             self._initialized = True
             print(f"[Orchestrator] Ready. Baseline Margin: {self._last_margin}")
@@ -67,6 +70,44 @@ class MarginOrchestrator:
         except Exception as e:
             print(f"[Orchestrator] Failed to check positions: {e}")
             return False
+
+    async def _reconcile_instrument_map(self, kite):
+        """
+        Removes 'Zombie' tokens from instrument_map that are no longer held.
+        Prevents 'Phantom Margin' from diluting Exit Ratios.
+        
+        Refinement: 
+        - Strict check: abs(qty) == 0 means closed.
+        - Run ONLY on Exits to avoid Entry race conditions.
+        """
+        try:
+            positions = kite.positions()
+            net = positions.get("net", [])
+            
+            # Build map of currently held Real Positions (Token -> Qty)
+            real_positions = {p["instrument_token"]: p["quantity"] for p in net}
+            
+            # Identify Zombies
+            zombies = []
+            for token in list(self._instrument_map.keys()):
+                # Case 1: Token not in real positions at all
+                if token not in real_positions:
+                    zombies.append(token)
+                    continue
+                
+                # Case 2: Token exists but Quantity is 0 (Closed)
+                qty = real_positions[token]
+                if abs(qty) == 0:
+                    zombies.append(token)
+            
+            # Purge Zombies
+            if zombies:
+                print(f"[Orchestrator] 🧟 Found {len(zombies)} Zombie Tokens in Map (Phantom Margin). Purging: {zombies}")
+                for z in zombies:
+                    del self._instrument_map[z]
+                    
+        except Exception as e:
+            print(f"[Orchestrator] Reconciliation failed: {e}")
 
     async def process_tick(self, new_orders: List[dict]):
         """
@@ -96,8 +137,34 @@ class MarginOrchestrator:
             
             live_balance = opening_balance + collateral - used_margin
             
+            # --- FIX: ACTIVE STATE RECONCILIATION (RESTART FIX) ---
+            # If Strategy is ACTIVE but Master is FLAT, we missed the exit event.
+            # Force Sync Exit.
+            if state_manager.is_active():
+                if await self._master_is_flat(kite):
+                     print("[Orchestrator] 🚨 SYNC CHECK: State Active but Master FLAT. Triggering Emergency Exit.")
+                     await execute_exit(
+                        master_id=self.master_id,
+                        exit_ratio=1.0,
+                        orders=[] # Forces 'Close All' mode in Replicator
+                     )
+                     self._instrument_map.clear()
+                     self._last_margin = live_balance
+                     return
+            # -----------------------------------------------------
+
             # 2. Logic Branch
             if not new_orders:
+                # --- FIX: MARGIN LAG DEBOUNCE (RACE FIX) ---
+                # Case: Margin Update arrives BEFORE Order Update.
+                # If we see a large drift (>5k) but no orders, we IGNORE it.
+                # We do NOT update baseline. We wait for the order to arrive.
+                drift = abs(self._last_margin - live_balance)
+                if drift > 5000:
+                    print(f"[Orchestrator] ⚠️ Significant Margin Drift ({drift}) but NO orders. Potential API Race. Holding Baseline.")
+                    return # Skip baseline update
+                # -------------------------------------------
+
                 # No orders: Just update baseline to absorb MTM changes
                 # This ensures we don't treat MTM swing as an "Entry" next time
                 self._last_margin = live_balance
@@ -141,6 +208,13 @@ class MarginOrchestrator:
             
             elif margin_delta < 0:
                 # --- EXIT (Margin Released) ---
+                
+                # --- FIX: ZOMBIE RECONCILIATION ---
+                # Before calculating ratio against 'Total Used', purge zombies.
+                # Only runs on EXIT to avoid Entry race conditions.
+                await self._reconcile_instrument_map(kite)
+                # ----------------------------------
+
                 released_amount = abs(margin_delta)
                 print(f"[Orchestrator] EXIT Triggered. Released: {released_amount}")
                 

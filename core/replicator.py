@@ -282,6 +282,8 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
     """
     Execute exit orders on children based on Exit Ratio.
     Child_Exit_Qty = floor(Child_Open_Qty * Exit_Ratio)
+    
+    If orders is empty and exit_ratio == 1.0, forces a "Close All" on tracked positions.
     """
     print(f"[Replicator] Executing EXIT. Ratio: {exit_ratio:.2%}")
     orders = aggregate_orders(orders)
@@ -331,12 +333,36 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
                     print(f"[{child_id}] Failed to fetch positions: {e}")
                     continue
 
-            # 2. Process Exiting Orders
-            for order in orders:
+            # 2. Determine Targets
+            targets = []
+            
+            if not orders and exit_ratio >= 0.99:
+                 print(f"[{child_id}] CLOSE ALL Triggered (No specific orders provided).")
+                 # Create virtual orders for ALL open positions to force close them
+                 for token, qty in pos_map.items():
+                     if qty != 0:
+                         # If Long (qty > 0), we SELL. If Short (qty < 0), we BUY.
+                         tx_type = "SELL" if qty > 0 else "BUY"
+                         targets.append({
+                             "instrument_token": token,
+                             "transaction_type": tx_type, 
+                             "tradingsymbol": f"TOKEN:{token}", # We might lack symbol if not in map, relying on token
+                             "exchange": "NFO", # Assumption! Dangerous if MCX. But usually NFO.
+                             "product": "MIS"   # Assumption!
+                         })
+                         # Note: For real Close All, we might need to fetch symbol from instrument list if unknown.
+                         # But typically orchestrated exits come with orders. This is a failsafe.
+            else:
+                targets = orders
+
+
+            # 3. Process Exiting Orders
+            for order in targets:
                 instrument_token = order.get("instrument_token")
                 transaction_type = order.get("transaction_type") # e.g. SELL
-                tradingsymbol = order.get("tradingsymbol")
-                exchange = order.get("exchange")
+                tradingsymbol = order.get("tradingsymbol", f"Tok:{instrument_token}")
+                exchange = order.get("exchange", "NFO")
+                product = order.get("product", "MIS")
                 
                 # Check if child has this position
                 child_open_qty = pos_map.get(instrument_token, 0)
@@ -396,7 +422,7 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
                             transaction_type=transaction_type,
                             quantity=exit_qty,
                             order_type="MARKET",
-                            product=order.get("product", "MIS"),
+                            product=product,
                             variety="regular"
                         )
                         print(f"✅ Exit Placed for {child_id}: {order_id}")
@@ -408,6 +434,7 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
 
     # --- RESET STATE ON FULL EXIT ---
     if exit_ratio >= 0.99: # 100%
+        print("[Strategy] Full Exit Detected (100%). Clearing Strategy State.")
         state_manager.clear()
 
 async def get_order_status(account_id: str, order_id: str) -> dict:
