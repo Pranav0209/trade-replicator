@@ -14,7 +14,7 @@ class MarginOrchestrator:
         self._last_margin: float = 0.0
         self._master_capital: float = 0.0 
         self._active_trades: Dict[str, dict] = {} 
-        self._instrument_map: Dict[int, float] = {} # {instrument_token: margin_used}
+        self._master_positions: Dict[int, int] = {} # {instrument_token: quantity}
         self._initialized = False
 
     async def initialize(self):
@@ -46,13 +46,23 @@ class MarginOrchestrator:
             # Total capital (for allocation calc) is current 'live_balance' + any 'used'
             # But simpler: use config capital or derived total if no trades active.
             # For now, let's use the DB stored capital as the 'BASE' for % calc.
-            self._master_capital = live_balance # Use LIVE capital as base for % calculation for accuracy 
+            self._master_capital = opening_balance + collateral # Use Total Equity (Net Worth) for consistent Ratio
             
             # Reset tracking map since we are establishing a new margin baseline
-            self._instrument_map.clear()
+            self._master_positions.clear()
+            # Hydrate positions from live
+            try:
+                pos = kite.positions()
+                net = pos.get("net", [])
+                for p in net:
+                    if p["quantity"] != 0:
+                        self._master_positions[p["instrument_token"]] = p["quantity"]
+            except Exception as e:
+                print(f"[Orchestrator] Warning: Failed to fetch initial positions: {e}")
+
             self._last_margin = live_balance
             self._initialized = True
-            print(f"[Orchestrator] Ready. Baseline Margin: {self._last_margin}")
+            print(f"[Orchestrator] Ready. Baseline Margin: {self._last_margin} | Positions Tracked: {len(self._master_positions)}")
             
         except Exception as e:
             print(f"[Orchestrator] Initialization failed: {e}")
@@ -71,43 +81,7 @@ class MarginOrchestrator:
             print(f"[Orchestrator] Failed to check positions: {e}")
             return False
 
-    async def _reconcile_instrument_map(self, kite):
-        """
-        Removes 'Zombie' tokens from instrument_map that are no longer held.
-        Prevents 'Phantom Margin' from diluting Exit Ratios.
-        
-        Refinement: 
-        - Strict check: abs(qty) == 0 means closed.
-        - Run ONLY on Exits to avoid Entry race conditions.
-        """
-        try:
-            positions = kite.positions()
-            net = positions.get("net", [])
-            
-            # Build map of currently held Real Positions (Token -> Qty)
-            real_positions = {p["instrument_token"]: p["quantity"] for p in net}
-            
-            # Identify Zombies
-            zombies = []
-            for token in list(self._instrument_map.keys()):
-                # Case 1: Token not in real positions at all
-                if token not in real_positions:
-                    zombies.append(token)
-                    continue
-                
-                # Case 2: Token exists but Quantity is 0 (Closed)
-                qty = real_positions[token]
-                if abs(qty) == 0:
-                    zombies.append(token)
-            
-            # Purge Zombies
-            if zombies:
-                print(f"[Orchestrator] 🧟 Found {len(zombies)} Zombie Tokens in Map (Phantom Margin). Purging: {zombies}")
-                for z in zombies:
-                    del self._instrument_map[z]
-                    
-        except Exception as e:
-            print(f"[Orchestrator] Reconciliation failed: {e}")
+    # _reconcile_instrument_map Removed (Replaced by Deterministic Position Tracking)
 
     async def process_tick(self, new_orders: List[dict]):
         """
@@ -148,29 +122,83 @@ class MarginOrchestrator:
                         exit_ratio=1.0,
                         orders=[] # Forces 'Close All' mode in Replicator
                      )
-                     self._instrument_map.clear()
+                     await execute_exit(
+                        master_id=self.master_id,
+                        exit_ratio=1.0,
+                        orders=[] # Forces 'Close All' mode in Replicator
+                     )
+                     self._master_positions.clear()
                      self._last_margin = live_balance
                      return
             # -----------------------------------------------------
 
             # 2. Logic Branch
-            if not new_orders:
-                # --- FIX: MARGIN LAG DEBOUNCE (RACE FIX) ---
-                # Case: Margin Update arrives BEFORE Order Update.
-                # If we see a large drift (>5k) but no orders, we IGNORE it.
-                # We do NOT update baseline. We wait for the order to arrive.
-                drift = abs(self._last_margin - live_balance)
-                if drift > 5000:
-                    print(f"[Orchestrator] ⚠️ Significant Margin Drift ({drift}) but NO orders. Potential API Race. Holding Baseline.")
-                    return # Skip baseline update
-                # -------------------------------------------
+            
+            # --- V1 EXIT LOGIC (QUANTITY BASED) ---
+            # Poll Positions to detect Exits directly.
+            # Rules:
+            # 1. Compare Current Qty vs Previous Qty (Per Token).
+            # 2. If Abs(Current) < Abs(Previous), it's an Exit.
+            # 3. Ratio = (Abs(Prev) - Abs(Curr)) / Abs(Prev).
+            # 4. Trigger execute_exit for that token.
+            
+            current_positions_map = {}
+            try:
+                positions = kite.positions()
+                net_positions = positions.get("net", [])
+                for p in net_positions:
+                     if p["quantity"] != 0:
+                         current_positions_map[p["instrument_token"]] = p["quantity"]
+            except Exception as e:
+                print(f"[Orchestrator] Failed to fetch positions for Exit Check: {e}")
+                # Don't return, allow Entry logic to proceed if needed, but skip exit check this tick
+                current_positions_map = self._master_positions # Assume no change to be safe
 
+            # Check for Exits
+            # Iterate through KNOWN previous positions
+            for token, prev_qty in list(self._master_positions.items()):
+                curr_qty = current_positions_map.get(token, 0)
+                
+                # Rule: Exit if Abs Qty Decreased
+                if abs(curr_qty) < abs(prev_qty):
+                    # EXIT DETECTED
+                    diff = abs(prev_qty) - abs(curr_qty)
+                    ratio = diff / abs(prev_qty)
+                    
+                    # Sanity Clamp
+                    if ratio > 1.0: ratio = 1.0
+                    if ratio < 0.0: ratio = 0.0 # Should be impossible with logic above
+
+                    print(f"[Orchestrator] EXIT DETECTED on {token}. {prev_qty} -> {curr_qty}. Ratio: {ratio:.2%}")
+                    
+                    # Construct Synthetic Order for Replicator
+                    # If Prev was Long (>0), we SELL. If Prev was Short (<0), we BUY.
+                    tx_type = "SELL" if prev_qty > 0 else "BUY"
+                    
+                    synthetic_order = [{
+                        "instrument_token": token,
+                        "transaction_type": tx_type,
+                        "quantity": diff, # Use diff as qty, though replicator uses ratio
+                        "product": "MIS", # Default
+                        "exchange": "NFO" # Default
+                    }]
+                    
+                    await execute_exit(
+                        master_id=self.master_id,
+                        exit_ratio=ratio,
+                        orders=synthetic_order
+                    )
+
+            # Update State
+            self._master_positions = current_positions_map
+            # ---------------------------------------
+
+            if not new_orders:
                 # No orders: Just update baseline to absorb MTM changes
-                # This ensures we don't treat MTM swing as an "Entry" next time
                 self._last_margin = live_balance
                 return
 
-            # 3. New Orders Detected
+            # 3. New Orders Detected (ENTRY ONLY)
             # Delta = Old (Before) - New (After)
             margin_delta = self._last_margin - live_balance
             print(f"[Orchestrator] Event! Old: {self._last_margin} -> New: {live_balance} | Delta: {margin_delta}")
@@ -183,156 +211,17 @@ class MarginOrchestrator:
                     allocation_pct = margin_delta / self._master_capital
                     print(f"[Orchestrator] ENTRY Triggered. Alloc%: {allocation_pct:.4f}")
                     
-                    # Update Instrument Map
-                    # Attribute Delta to instruments in new_orders
-                    # Simplification: Split equally if multiple orders
-                    if len(new_orders) > 0:
-                        split_delta = margin_delta / len(new_orders)
-                        for order in new_orders:
-                            token = order.get("instrument_token")
-                            self._instrument_map[token] = self._instrument_map.get(token, 0.0) + split_delta
-                    
-                    # Store trade state for future exit reference (Legacy/Debug)
-                    for order in new_orders:
-                        self._active_trades[order['order_id']] = {
-                            "margin_used": margin_delta,
-                            "allocation_pct": allocation_pct
-                        }
+                    # Note: We don't update _instrument_map anymore (it's gone).
+                    # We strictly rely on Positions for exits.
                     
                     await execute_entry(
                         master_id=self.master_id, 
                         allocation_pct=allocation_pct, 
                         orders=new_orders,
-                        master_pre_trade_margin=self._last_margin
+                        master_pre_trade_margin=self._master_capital # Use Total Capital (Equity) for ratio
                     )
             
-            elif margin_delta < 0:
-                # --- EXIT (Margin Released) ---
-                
-                # --- FIX: ZOMBIE RECONCILIATION ---
-                # Before calculating ratio against 'Total Used', purge zombies.
-                # Only runs on EXIT to avoid Entry race conditions.
-                await self._reconcile_instrument_map(kite)
-                # ----------------------------------
-
-                released_amount = abs(margin_delta)
-                print(f"[Orchestrator] EXIT Triggered. Released: {released_amount}")
-                
-                # Identify instruments exiting
-                # assumption: new_orders contains the exit orders
-                exiting_orders = new_orders 
-                
-                # --- CRITICAL SAFETY: FULL EXIT CHECK ---
-                # Margin calculation fails in loss scenarios (Ratio < 100% even if full exit).
-                # Force 100% exit if Master is legally flat.
-                if await self._master_is_flat(kite):
-                    print("[Orchestrator] 🚨 Master is FLAT. Forcing 100% Exit (Ignoring Margin Delta).")
-                    await execute_exit(
-                        master_id=self.master_id,
-                        exit_ratio=1.0,
-                        orders=exiting_orders
-                    )
-                    # Clear map as we are fully flat
-                    self._instrument_map.clear()
-                    # Update baseline and return early
-                    self._last_margin = live_balance
-                    return
-                # ----------------------------------------
-                
-                if not exiting_orders:
-                    print("[Orchestrator] Exit detected but no orders found? (Maybe delayed update)")
-                else:
-                    # Logic: We need to calculate Exit Ratio per instrument
-                    # If multiple instruments exit, we might need to handle them individually
-                    # BUT margin is released in aggregate.
-                    # Heuristic: sum up the 'used margin' of all these instruments from our map
-                    
-                    total_used_for_these_instruments = 0.0
-                    relevant_tokens = []
-                    
-                    for order in exiting_orders:
-                        token = order.get("instrument_token")
-                        if token:
-                            relevant_tokens.append(token)
-                            total_used_for_these_instruments += self._instrument_map.get(token, 0.0)
-                    
-                    if total_used_for_these_instruments > 0:
-                        exit_ratio = released_amount / total_used_for_these_instruments
-                        # Clamp ratio to 1.0 (100%) to avoid overshoot due to MTM gains/losses affecting release
-                        if exit_ratio > 1.0: exit_ratio = 1.0
-                        
-                        print(f"[Orchestrator] Exit Ratio: {exit_ratio:.2%} (Rel: {released_amount} / Used: {total_used_for_these_instruments})")
-                        
-                        # Update Map (Reduce used margin)
-                        # We reduce proportionally or just reset if ratio is 1?
-                        # Reduce by the released amount distributed?
-                        # Actually if we exit X%, we should reduce map by X%?
-                        # Or reduce by actual released amount? 
-                        # Better to reduce by RELEASED amount to keep Delta math consistent?
-                        # No, map tracks "Entry Cost". Released amount includes PnL?
-                        # Wait. Zerodha Margin:
-                        # Entry: 1L used. Map = 1L.
-                        # Exit: 1.2L released (Profit). Delta = -1.2L.
-                        # Ratio = 1.2L / 1L = 120%. -> Clamped to 100%.
-                        # Map becomes 0.
-                        # Correct.
-                        
-                        # What if Loss?
-                        # Entry: 1L used.
-                        # Exit: 0.8L released (Loss). Delta = -0.8L.
-                        # Ratio = 0.8L / 1L = 80%.
-                        # Child exits 80%? NO. Child should exit 100% if Master exited 100%.
-                        # This is the flaw of "Margin Based Exit" if PnL is involved.
-                        
-                        # USER SAID: "Children exit only when master exits."
-                        # "Exit Ratio = Delta_Exit / Total_Margin_Used"
-                        # If PnL makes Delta != Used, Ratio != 100%.
-                        
-                        # CORRECT APPROACH for 100% Exit:
-                        # If Master Order Status is COMPLETE and Quantity matches Position?
-                        # But we are polling Orders.
-                        # If Master sells 100 qty and had 100 qty.
-                        # Only reliable way is Quantity Checks? 
-                        # User said "No Quantity Based". "Replication is based on economic exposure".
-                        
-                        # User's Note: "Exit Ratio = DeltaM / TotalMarginUsed"
-                        # "Supports Partial Exits".
-                        # If Loss case happens (80% release), we exit 80% of child?
-                        # That leaves 20% on child. Master is flat.
-                        # This is DANGEROUS.
-                        
-                        # REFINEMENT:
-                        # We must ensure that if Master is FLAT, Child is FLAT.
-                        # Margin Delta is good for *Partial* scaling.
-                        # But for *Full* exit, we need to know it was full.
-                        
-                        # However, based on STRICT user spec "Compute exit ratio... Apply to children",
-                        # I will implement as requested.
-                        # But I will add a safety check: Recalculate based on "Released / (Used - PnL?)" Impossible.
-                        # Maybe we rely on the clamp.
-                        # If > 1.0 it clamps.
-                        # If < 1.0 (Loss), it partial exits.
-                        # If Master is flat, but Child has 20% left...
-                        # This implies we need a "Cleanup" sweep?
-                        
-                        # FOR NOW: Implement strict spec.
-                        
-                        for token in relevant_tokens:
-                             # Reduce map
-                             # If we have multiple tokens, how do we attribute release?
-                             # Proportional to their weight in 'used'?
-                             weight = self._instrument_map.get(token, 0) / total_used_for_these_instruments
-                             attributed_release = released_amount * weight
-                             self._instrument_map[token] = max(0, self._instrument_map.get(token, 0) - attributed_release)
-
-                        await execute_exit(
-                            master_id=self.master_id,
-                            exit_ratio=exit_ratio,
-                            orders=exiting_orders
-                        )
-                    else:
-                        print(f"[Orchestrator] No tracked margin found for tokens {relevant_tokens}. Assuming 100% exit?")
-                        await execute_exit(self.master_id, 1.0, exiting_orders)
+            # REMOVED: elif margin_delta < 0 (Margin Based Exit)
 
             # Update baseline
             self._last_margin = live_balance

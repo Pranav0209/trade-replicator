@@ -30,8 +30,7 @@ A robust, margin-based trade replication system designed for Zerodha KiteConnect
   - **Margin Debounce**: Prevents "False Signals" caused by API race conditions (where Margin updates arrive milliseconds before the Order confirmation). If a significant margin drift is detected without a corresponding order, the system "holds" the baseline until the order arrives.
 - **Self-Healing Mechanisms**:
   - **Active State Reconciliation**: If the service is restarted _after_ a manual exit, it detects the anomaly (Active Strategy + Flat Master) and triggers an emergency 100% Exit on children to sync state.
-  - **Zombie Map Reconciliation**: On every Exit event, the system cross-checks its internal memory against live Zerodha positions. It automatically purges "Phantom Tokens" (e.g., from previous missed exits), ensuring that the Exit Ratio is calculated against reality.
-  - **Clean Slate Initialization**: Restarts wipe the internal instrument map to prevent ghost data from persisting across sessions.
+  - **Position-Based Truth**: By relying on live `kite.positions()` instead of internal maps, the system naturally "heals" from missed ticks by detecting the net quantity change on the next successful poll.
 - **Persisted State**:
   - **Strategy State**: The "Frozen Ratio" is saved to disk (`data/strategy_state.json`) immediately upon creation.
   - **Resilience**: The system can be restarted (e.g., over the weekend) and will resume the active strategy with the correct ratio on Monday.
@@ -113,13 +112,18 @@ To ensure complex multi-leg strategies (like Iron Condors) are replicated with p
     - Leg 2 (Master 10 lots) -> Child (3 lots) - **No Recalculation**.
 6.  **Reset**: When the Master exits 100% of the strategy, the state is cleared, ready for a new snapshot next time.
 
-### 2. Exit Logic
+### 2. Exit Logic (V1 Quantity Model)
 
-Exits are proportional to the Master's exit.
+Exits are triggered by **Position Changes**, not Margin Deltas. This ensures deterministic behavior.
 
-- If Master exits 50% of their position, Child exits 50% of theirs (Percentage Based).
-- **Why?** This ensures the system is self-correcting. If the Child has fewer lots than expected, it still closes the correct _proportion_ of its holdings, preventing "Short" positions or orphaned lots.
-- If Master exits 100%, Child exits 100% and the Strategy State resets.
+- **Polling**: The system monitors the Master's Net Positions (`kite.positions()`) on every tick.
+- **Diff Detection**: It compares `Current Quantity` vs `Previous Quantity` for every instrument.
+- **Ratio Calculation**:
+  - `Ratio = (Abs(Prev_Qty) - Abs(Curr_Qty)) / Abs(Prev_Qty)`
+  - This handles **Partial Exits** perfectly (e.g., 50/100 = 50% exit).
+  - This handles **Full Exits** perfectly (0/100 = 100% exit).
+- **Per-Leg Execution**: Exits are triggered specifically for the instrument that changed, managing complex multi-leg adjustments accurately.
+- **Safety Sync**: If the Master account is legally "Flat" (0 positions), a safety mechanism forces a 100% cleanup on all children to prevent any orphan positions.
 
 ## 🔄 System Flow (Mental Map)
 

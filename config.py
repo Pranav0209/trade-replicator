@@ -27,7 +27,7 @@ ACCOUNTS = [
         "api_key": os.getenv("CHILD_A_API_KEY", "child_a_key"),
         "api_secret": os.getenv("CHILD_A_API_SECRET", "child_a_secret"),
         "is_master": False,
-        "capital": 1000000.0,
+        "capital": 500000.0,
         "enabled": True
     },
 
