@@ -28,9 +28,10 @@ A robust, margin-based trade replication system designed for Zerodha KiteConnect
   - **Duplicate Exit Prevention**: Smart tracking of local position state ensures that multiple exit signals for the same instrument do not trigger duplicate exit orders on child accounts.
   - **Safe Lot Sizing**: Currently configured with explicit lot size safeguards (e.g., Nifty @ 65) to ensure integer lot calculations and prevent fractional order errors.
   - **Margin Debounce**: Prevents "False Signals" caused by API race conditions (where Margin updates arrive milliseconds before the Order confirmation). If a significant margin drift is detected without a corresponding order, the system "holds" the baseline until the order arrives.
-- **Self-Healing Mechanisms**:
-  - **Active State Reconciliation**: If the service is restarted _after_ a manual exit, it detects the anomaly (Active Strategy + Flat Master) and triggers an emergency 100% Exit on children to sync state.
-  - **Position-Based Truth**: By relying on live `kite.positions()` instead of internal maps, the system naturally "heals" from missed ticks by detecting the net quantity change on the next successful poll.
+- **Self-Healing Mechanisms & Robustness**:
+  - **Entry Grace Window**: Implements a dedicated "Grace Period" (e.g., 15 seconds) after any new entry. During this window, the system suppresses "Master Flat" checks to allow the Zerodha Positions API to catch up with the Order API. This prevents false "Emergency Exits" caused by API latency where the Order is complete but the Position list is temporarily empty.
+  - **Active State Reconciliation**: Safely handles service restarts. If the strategy is Active but Master is genuinely Flat (after the grace period), it correctly triggers a 100% Exit on children and **clears the strategy state**, preventing infinite exit loops.
+  - **Redundant Exit Protection**: The Orchestrator ensures emergency exits are triggered exactly once per event, preventing duplicate order submission.
 - **Persisted State**:
   - **Strategy State**: The "Frozen Ratio" is saved to disk (`data/strategy_state.json`) immediately upon creation.
   - **Resilience**: The system can be restarted (e.g., over the weekend) and will resume the active strategy with the correct ratio on Monday.

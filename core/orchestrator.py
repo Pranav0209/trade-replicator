@@ -2,6 +2,7 @@ import asyncio
 from typing import List, Dict, Optional
 from datetime import datetime
 import math
+import time
 from kiteconnect import KiteConnect
 import config
 from db.storage import db
@@ -12,6 +13,7 @@ class MarginOrchestrator:
     def __init__(self, master_user_id: str):
         self.master_id = master_user_id
         self._last_margin: float = 0.0
+        self._last_entry_ts: float = 0.0
         self._master_capital: float = 0.0 
         self._active_trades: Dict[str, dict] = {} 
         self._master_positions: Dict[int, int] = {} # {instrument_token: quantity}
@@ -115,13 +117,12 @@ class MarginOrchestrator:
             # If Strategy is ACTIVE but Master is FLAT, we missed the exit event.
             # Force Sync Exit.
             if state_manager.is_active():
-                if await self._master_is_flat(kite):
+                # Fix: Grace Period to allow Position API to catch up after Entry
+                if time.time() - self._last_entry_ts < 10:
+                    print(f"[Orchestrator] Within Entry Grace Period ({int(time.time() - self._last_entry_ts)}s / 15s). Skipping Sync Check.")
+                elif await self._master_is_flat(kite):
                      print("[Orchestrator] 🚨 SYNC CHECK: State Active but Master FLAT. Triggering Emergency Exit.")
-                     await execute_exit(
-                        master_id=self.master_id,
-                        exit_ratio=1.0,
-                        orders=[] # Forces 'Close All' mode in Replicator
-                     )
+                     # Only one exit call is needed. The Replicator will calculate and close all positions.
                      await execute_exit(
                         master_id=self.master_id,
                         exit_ratio=1.0,
@@ -129,6 +130,8 @@ class MarginOrchestrator:
                      )
                      self._master_positions.clear()
                      self._last_margin = live_balance
+                     print("[Orchestrator] Emergency Exit Complete. Clearing Strategy State.")
+                     state_manager.clear()
                      return
             # -----------------------------------------------------
 
@@ -229,6 +232,7 @@ class MarginOrchestrator:
                         orders=new_orders,
                         master_pre_trade_margin=self._master_capital # Use Total Capital (Equity) for ratio
                     )
+                    self._last_entry_ts = time.time()
             
             # REMOVED: elif margin_delta < 0 (Margin Based Exit)
 

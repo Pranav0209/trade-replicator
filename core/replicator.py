@@ -418,7 +418,11 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
                         "child_id": child_id,
                         "status": "simulated",
                         "qty": exit_qty,
-                        "type": "exit"
+                        "type": "exit",
+                        "instrument_token": instrument_token,
+                        "transaction_type": transaction_type,
+                        "tradingsymbol": tradingsymbol,
+                        "timestamp": datetime.utcnow().isoformat()
                     })
                 else:
                     # Place Real Order
