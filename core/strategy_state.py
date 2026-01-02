@@ -1,6 +1,7 @@
 import json
 import os
 from typing import Dict, Optional
+from datetime import datetime
 
 class StrategyState:
     STATE_FILE = "data/strategy_state.json"
@@ -19,7 +20,8 @@ class StrategyState:
         return {
             "active": False,
             "frozen_ratio": None,
-            "master_initial_margin": None
+            "master_initial_margin": None,
+            "start_time": None
         }
 
     def _save(self):
@@ -36,7 +38,8 @@ class StrategyState:
         """Mark strategy as ACTIVE."""
         if not self.is_active():
             self._state["active"] = True
-            print("[StrategyState] State set to ACTIVE.")
+            self._state["start_time"] = datetime.utcnow().isoformat()
+            print(f"[StrategyState] State set to ACTIVE. Start: {self._state['start_time']}")
             self._save()
 
     def clear(self):
@@ -45,7 +48,8 @@ class StrategyState:
         self._state = {
             "active": False,
             "frozen_ratio": None,
-            "master_initial_margin": None
+            "master_initial_margin": None,
+            "start_time": None
         }
         self._save()
 
@@ -67,6 +71,9 @@ class StrategyState:
     def set_master_initial_margin(self, margin: float):
         self._state["master_initial_margin"] = margin
         self._save()
+
+    def get_start_time(self) -> Optional[str]:
+        return self._state.get("start_time")
 
 # Singleton Instance
 state_manager = StrategyState()

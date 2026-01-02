@@ -12,6 +12,17 @@ import json
 import os
 from core.strategy_state import state_manager
 
+def get_lot_size(tradingsymbol: str) -> int:
+    """
+    Get lot size based on trading symbol.
+    Logic: NIFTY -> 65 (User Config). Others -> 1 (Default).
+    """
+    if "NIFTY" in tradingsymbol:
+        # Note: Standard Nifty 50 Lot Size is 25, but User requested 65.
+        # This handles BANKNIFTY/FINNIFTY overlaps by default unless specific overrides added.
+        return 65
+    return 1
+
 def aggregate_orders(orders: list) -> list:
     """
     Aggregates split orders into single orders by Instrument + Transaction Type.
@@ -209,7 +220,7 @@ async def execute_entry(master_id: str, allocation_pct: float, orders: list, mas
                 if master_qty == 0: continue
 
                 # Scale Quantity
-                LOT_SIZE = 65 
+                LOT_SIZE = get_lot_size(tradingsymbol)
                 master_lots = master_qty / LOT_SIZE
                 child_lots = math.floor(master_lots * ratio)
                 child_quantity = int(child_lots * LOT_SIZE)
@@ -299,7 +310,13 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
             
             if config.DRY_RUN:
                 # Calculate Net Positions from DB History
-                child_orders = await db.orders.find({"child_id": child_id})
+                # Filter by Strategy Start Time to prevent drift from old cycles
+                query = {"child_id": child_id}
+                start_time = state_manager.get_start_time()
+                if start_time:
+                    query["timestamp"] = {"$gte": start_time}
+                
+                child_orders = await db.orders.find(query)
                 for o in child_orders:
                     # Robustness: Skip orders without token/type
                     if "instrument_token" not in o or "transaction_type" not in o:
@@ -348,7 +365,7 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
                              "transaction_type": tx_type, 
                              "tradingsymbol": f"TOKEN:{token}", # We might lack symbol if not in map, relying on token
                              "exchange": "NFO", # Assumption! Dangerous if MCX. But usually NFO.
-                             "product": "MIS"   # Assumption!
+                             "product": "NRML"   # Default to NRML
                          })
                          # Note: For real Close All, we might need to fetch symbol from instrument list if unknown.
                          # But typically orchestrated exits come with orders. This is a failsafe.
@@ -362,7 +379,7 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
                 transaction_type = order.get("transaction_type") # e.g. SELL
                 tradingsymbol = order.get("tradingsymbol", f"Tok:{instrument_token}")
                 exchange = order.get("exchange", "NFO")
-                product = order.get("product", "MIS")
+                product = order.get("product", "NRML")
                 
                 # Check if child has this position
                 child_open_qty = pos_map.get(instrument_token, 0)
@@ -379,7 +396,7 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
                 # Calculate Qty
                 exit_ratio = min(exit_ratio, 1.0) # Safety Clamp
                 
-                LOT_SIZE = 65
+                LOT_SIZE = get_lot_size(tradingsymbol)
                 
                 if exit_ratio >= 0.99:
                      # FULL MATCH: Exit exactly what we have (clean sweep)

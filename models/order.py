@@ -9,7 +9,7 @@ class OrderIn(BaseModel):
     price: float
     order_type: str        # "MARKET" | "LIMIT"
     transaction_type: str  # "BUY" | "SELL"
-    product: str = "MIS"   # "MIS" | "CNC" | "CO" | "BO"
+    product: str = "NRML"   # "MIS" | "CNC" | "CO" | "BO"
 
 class ReplicateOrderIn(BaseModel):
     master_account_id: str
@@ -18,7 +18,7 @@ class ReplicateOrderIn(BaseModel):
     price: float
     order_type: str
     transaction_type: str
-    product: str = "MIS"
+    product: str = "NRML"
     # Replication strategy: pass child accounts or use pre-configured list
     child_accounts: Optional[list] = None
 

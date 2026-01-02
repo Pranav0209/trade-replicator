@@ -11,6 +11,8 @@ A robust, margin-based trade replication system designed for Zerodha KiteConnect
   - **Safety**: Ratios are capped at 1.0x to prevent over-leveraging children.
 - **Pre-Trade Margin Accuracy**:
   - Uses the Master's margin _before_ the trade execution to calculate ratios, avoiding inflation caused by post-trade margin drops.
+- **Default Product Type**:
+  - All orders are now executed as **NRML (Carry Forward)** by default, aligning with standard swing trading and positional strategies.
 - **Dynamic Wiring**:
   - No hardcoded configuration for child accounts. Simply link an account via the API.
   - **Max Capital Usage**: Configure a specific maximum capital limit per child account directly from the UI. The replicator expects this limit when calculating ratios (`min(Available, Max_Cap)`).
@@ -22,14 +24,18 @@ A robust, margin-based trade replication system designed for Zerodha KiteConnect
   - **Smart Formatting**: Auto-converts timestamps to local time (IST) and currency to Indian numbering format (₹1,00,000).
 - **Safety First**:
   - Positions in the Master account are _observed_ but replication is event-driven.
-  - **Zero Position Enforcement**: If the Master account is detected as "Flat" (0 open positions), the system calculates a **100% Exit Ratio** for all children immediately, bypassing any margin delta logic. This guarantees no orphan positions in loss scenarios.
+  - **Strict Logic Separation**:
+    - **Entries**: Triggered _only_ by `New Orders` + `Margin Delta` (Economic Exposure).
+    - **Exits**: Triggered _only_ by `Position Changes` (Net Quantity Delta).
+    - **Zero Position Compliance**: If the Master account is detected as genuinely "Flat" (0 open positions) and no orders are pending, the system triggers a **100% Exit** on children.
 - **Precision & Robustness**:
   - **Order Aggregation**: Automatically aggregates simultaneous split orders (e.g., Master splits 100 lots into 4x25) into a single virtual order before calculation. This eliminates rounding losses that occur when replicating small individual orders.
   - **Duplicate Exit Prevention**: Smart tracking of local position state ensures that multiple exit signals for the same instrument do not trigger duplicate exit orders on child accounts.
-  - **Safe Lot Sizing**: Currently configured with explicit lot size safeguards (e.g., Nifty @ 65) to ensure integer lot calculations and prevent fractional order errors.
+  - **Dynamic Lot Sizing**: Automatically adapts to different instruments. Defaults to `65` (User Config) for NIFTY indices/options and `1` for stocks/others.
   - **Margin Debounce**: Prevents "False Signals" caused by API race conditions (where Margin updates arrive milliseconds before the Order confirmation). If a significant margin drift is detected without a corresponding order, the system "holds" the baseline until the order arrives.
 - **Self-Healing Mechanisms & Robustness**:
-  - **Entry Grace Window**: Implements a dedicated "Grace Period" (e.g., 15 seconds) after any new entry. During this window, the system suppresses "Master Flat" checks to allow the Zerodha Positions API to catch up with the Order API. This prevents false "Emergency Exits" caused by API latency where the Order is complete but the Position list is temporarily empty.
+  - **Order-Aware Sync Checks**: The emergency "Master Flat" check is now smart enough to pause if `New Orders` are detected in the same poll cycle. This prevents false "Panic Exits" when a new entry is placed but the Position API hasn't updated yet.
+  - **Entry Grace Window**: Implements a dedicated "Grace Period" (e.g., 10 seconds) after any new entry to further shield against API latency.
   - **Active State Reconciliation**: Safely handles service restarts. If the strategy is Active but Master is genuinely Flat (after the grace period), it correctly triggers a 100% Exit on children and **clears the strategy state**, preventing infinite exit loops.
   - **Redundant Exit Protection**: The Orchestrator ensures emergency exits are triggered exactly once per event, preventing duplicate order submission.
 - **Persisted State**:

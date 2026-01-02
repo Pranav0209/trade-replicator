@@ -118,8 +118,11 @@ class MarginOrchestrator:
             # Force Sync Exit.
             if state_manager.is_active():
                 # Fix: Grace Period to allow Position API to catch up after Entry
-                if time.time() - self._last_entry_ts < 10:
-                    print(f"[Orchestrator] Within Entry Grace Period ({int(time.time() - self._last_entry_ts)}s / 15s). Skipping Sync Check.")
+                # NEW FIX: If we have new orders THIS TICK, do not punish the system for API lag.
+                if new_orders:
+                    print("[Orchestrator] New Orders detected. Skipping Sync Check to prevent race condition.")
+                elif time.time() - self._last_entry_ts < 10:
+                    print(f"[Orchestrator] Within Entry Grace Period ({int(time.time() - self._last_entry_ts)}s / 10s). Skipping Sync Check.")
                 elif await self._master_is_flat(kite):
                      print("[Orchestrator] 🚨 SYNC CHECK: State Active but Master FLAT. Triggering Emergency Exit.")
                      # Only one exit call is needed. The Replicator will calculate and close all positions.
@@ -182,7 +185,7 @@ class MarginOrchestrator:
                         "instrument_token": token,
                         "transaction_type": tx_type,
                         "quantity": diff, # Use diff as qty, though replicator uses ratio
-                        "product": "MIS", # Default
+                        "product": "NRML", # Default to NRML (Carry Forward) as per user request
                         "exchange": "NFO" # Default
                     }]
                     
@@ -191,6 +194,12 @@ class MarginOrchestrator:
                         exit_ratio=ratio,
                         orders=synthetic_order
                     )
+
+                    # 🔑 CRITICAL FIX: Update state immediately to prevent duplicate processing
+                    if curr_qty == 0:
+                        del self._master_positions[token]
+                    else:
+                        self._master_positions[token] = curr_qty
 
             # Update State
             self._master_positions = current_positions_map
@@ -205,34 +214,30 @@ class MarginOrchestrator:
                  state_manager.clear()
             # ---------------------------------------
 
-            if not new_orders:
-                # No orders: Just update baseline to absorb MTM changes
-                self._last_margin = live_balance
-                return
+            if new_orders:
+                # 3. New Orders Detected (ENTRY ONLY)
+                # Delta = Old (Before) - New (After)
+                margin_delta = self._last_margin - live_balance
+                print(f"[Orchestrator] Event! Old: {self._last_margin} -> New: {live_balance} | Delta: {margin_delta}")
 
-            # 3. New Orders Detected (ENTRY ONLY)
-            # Delta = Old (Before) - New (After)
-            margin_delta = self._last_margin - live_balance
-            print(f"[Orchestrator] Event! Old: {self._last_margin} -> New: {live_balance} | Delta: {margin_delta}")
-
-            if margin_delta > 0:
-                # --- ENTRY (Margin Used) ---
-                if margin_delta < 500: 
-                    print("[Orchestrator] Delta too small, ignoring.")
-                else:
-                    allocation_pct = margin_delta / self._master_capital
-                    print(f"[Orchestrator] ENTRY Triggered. Alloc%: {allocation_pct:.4f}")
-                    
-                    # Note: We don't update _instrument_map anymore (it's gone).
-                    # We strictly rely on Positions for exits.
-                    
-                    await execute_entry(
-                        master_id=self.master_id, 
-                        allocation_pct=allocation_pct, 
-                        orders=new_orders,
-                        master_pre_trade_margin=self._master_capital # Use Total Capital (Equity) for ratio
-                    )
-                    self._last_entry_ts = time.time()
+                if margin_delta > 0:
+                    # --- ENTRY (Margin Used) ---
+                    if margin_delta < 500: 
+                        print("[Orchestrator] Delta too small, ignoring.")
+                    else:
+                        allocation_pct = margin_delta / self._master_capital
+                        print(f"[Orchestrator] ENTRY Triggered. Incremental Alloc%: {allocation_pct:.4f} (Delta: {margin_delta:.2f})")
+                        
+                        # Note: We don't update _instrument_map anymore (it's gone).
+                        # We strictly rely on Positions for exits.
+                        
+                        await execute_entry(
+                            master_id=self.master_id, 
+                            allocation_pct=allocation_pct, 
+                            orders=new_orders,
+                            master_pre_trade_margin=self._master_capital # Use Total Capital (Equity) for ratio
+                        )
+                        self._last_entry_ts = time.time()
             
             # REMOVED: elif margin_delta < 0 (Margin Based Exit)
 
