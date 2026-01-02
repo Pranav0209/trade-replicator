@@ -191,6 +191,15 @@ class MarginOrchestrator:
 
             # Update State
             self._master_positions = current_positions_map
+            
+            # --- STRATEGY LIFECYCLE MANAGEMENT ---
+            # Strategy Ends ONLY if Master is completely flat (No open positions across ALL tokens).
+            # We check _master_positions values (quantities).
+            is_master_flat = not any(qty != 0 for qty in self._master_positions.values())
+            
+            if is_master_flat and state_manager.is_active():
+                 print("[Orchestrator] Master is Fully Flat. Ending Strategy Cycle. Clearing State.")
+                 state_manager.clear()
             # ---------------------------------------
 
             if not new_orders:

@@ -114,16 +114,21 @@ To ensure complex multi-leg strategies (like Iron Condors) are replicated with p
 
 ### 2. Exit Logic (V1 Quantity Model)
 
-Exits are triggered by **Position Changes**, not Margin Deltas. This ensures deterministic behavior.
+Exits are triggered by **Position Changes**, not Margin Deltas.
 
 - **Polling**: The system monitors the Master's Net Positions (`kite.positions()`) on every tick.
-- **Diff Detection**: It compares `Current Quantity` vs `Previous Quantity` for every instrument.
-- **Ratio Calculation**:
-  - `Ratio = (Abs(Prev_Qty) - Abs(Curr_Qty)) / Abs(Prev_Qty)`
-  - This handles **Partial Exits** perfectly (e.g., 50/100 = 50% exit).
-  - This handles **Full Exits** perfectly (0/100 = 100% exit).
-- **Per-Leg Execution**: Exits are triggered specifically for the instrument that changed, managing complex multi-leg adjustments accurately.
-- **Safety Sync**: If the Master account is legally "Flat" (0 positions), a safety mechanism forces a 100% cleanup on all children to prevent any orphan positions.
+- **Diff Detection**: `Ratio = (Abs(Prev_Qty) - Abs(Curr_Qty)) / Abs(Prev_Qty)`.
+- **Quantization**: Partial exits are rounded down to the nearest `LOT_SIZE` (e.g., 65) to prevent fractional "dust" positions. Full exits (Ratio=1.0) close the exact open quantity.
+
+### 3. Strategy Lifecycle (The "Single Strategy" Rule)
+
+To ensure mathematical correctness for complex strategies (Iron Condors, Adjustments, Rolls):
+
+1.  **Start**: Triggered by the **First Entry** when the Master was previously flat.
+2.  **Frozen Ratio**: Calculated ONCE at the start (`Child_Capital / Master_Total_Equity`).
+3.  **Persistence**: This ratio is **Locked** and used for ALL subsequent entries, adjustments, and partial exits.
+4.  **End**: The strategy state is cleared **ONLY** when the Master Account is **Completely Flat** (0 Open Positions across all instruments).
+    - _Crucial_: Exiting one leg fully (e.g., closing the PE side) does NOT end the strategy. The ratio persists for the remaining legs.
 
 ## 🔄 System Flow (Mental Map)
 

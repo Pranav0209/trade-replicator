@@ -108,7 +108,8 @@ async def startup():
                     "$set": {
                         "api_key": acc_cfg["api_key"],
                         "api_secret": acc_cfg["api_secret"],
-                        "is_master": acc_cfg.get("is_master", False)
+                        "is_master": acc_cfg.get("is_master", False),
+                        "capital": acc_cfg.get("capital", 0)
                     }
                 }
             )

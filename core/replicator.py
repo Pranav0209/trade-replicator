@@ -379,10 +379,17 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
                 # Calculate Qty
                 exit_ratio = min(exit_ratio, 1.0) # Safety Clamp
                 
-                # exit_ratio usually 0.0 to 1.0 (or >1.0 clamped).
-                # abs() to handle short positions (qty < 0).
+                LOT_SIZE = 65
                 
-                exit_qty = math.floor(abs(child_open_qty) * exit_ratio)
+                if exit_ratio >= 0.99:
+                     # FULL MATCH: Exit exactly what we have (clean sweep)
+                     exit_qty = abs(child_open_qty)
+                else:
+                     # PARTIAL MATCH: Must be integer multiple of LOT_SIZE
+                     raw_qty = abs(child_open_qty) * exit_ratio
+                     lots = math.floor(raw_qty / LOT_SIZE)
+                     exit_qty = int(lots * LOT_SIZE)
+                
                 
                 if exit_qty == 0:
                     print(f"[{child_id}] Calculated 0 exit query (Ratio {exit_ratio:.2f} * {child_open_qty}), skipping.")
@@ -432,10 +439,10 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
         except Exception as e:
             print(f"[{child_id}] Exit processing failed: {e}")
 
-    # --- RESET STATE ON FULL EXIT ---
-    if exit_ratio >= 0.99: # 100%
-        print("[Strategy] Full Exit Detected (100%). Clearing Strategy State.")
-        state_manager.clear()
+    # --- RESET STATE LOGIC REMOVED ---
+    # Strategy Reset is now exclusively handled by the Orchestrator
+    # when it confirms the Master Account is completely flat.
+    pass
 
 async def get_order_status(account_id: str, order_id: str) -> dict:
     """
