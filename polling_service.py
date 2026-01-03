@@ -26,6 +26,23 @@ async def start_polling():
     seen_order_ids = set()
     kite_client = None
 
+    # --- WARMUP PHASE ---
+    # Fetch existing orders to prevent reprocessing history on restart
+    try:
+        acc = await db.accounts.find_one({"account_id": config.MASTER_USER_ID})
+        if acc and acc["status"] == "connected":
+            print("[Poll Service] Warming up: Fetching historical orders...")
+            kite = KiteConnect(api_key=acc["api_key"])
+            kite.set_access_token(acc["access_token"])
+            existing_orders = kite.orders()
+            for order in existing_orders:
+                if order["status"] == "COMPLETE":
+                    seen_order_ids.add(order["order_id"])
+            print(f"[Poll Service] Warmup complete. Ignoring {len(seen_order_ids)} historical orders.")
+    except Exception as e:
+        print(f"[Poll Service] Warmup warning (non-fatal): {e}")
+    # --------------------
+
     while True:
         try:
             # OPTIMIZATION: Singleton Kite Client
@@ -51,7 +68,8 @@ async def start_polling():
                         seen_order_ids.add(order["order_id"])
             
             # 2. Pass to Orchestrator (Tick)
-            # Even if no orders,            # 2. Process via Orchestrator
+            # Only trigger orchestrator if we have new orders or just to maintain heartbeat
+            # We always call it because Orchestrator also monitors Margin Drifts (without orders)
             await orchestrator.process_tick(new_orders)
             
             # Optimization: Prevent memory leak

@@ -5,10 +5,12 @@ A robust, margin-based trade replication system designed for Zerodha KiteConnect
 ## 🚀 Key Features
 
 - **Single Strategy "Frozen Ratio" Logic**:
+
   - **Baseline Snapshot**: On the _first leg_ of a new strategy, the system snapshots the available margin of Master (Pre-Trade) and Child.
   - **Frozen Ratio**: Calculates `Ratio = Child_Available / Master_Available` once and **locks it**.
   - **Symmetry**: All subsequent legs (hedges, adjustments) use this exact frozen ratio to ensure perfect hedge symmetry.
-  - **Safety**: Ratios are capped at 1.0x to prevent over-leveraging children.
+  - **Symmetry**: All subsequent legs (hedges, adjustments) use this exact frozen ratio to ensure perfect hedge symmetry.
+
 - **Pre-Trade Margin Accuracy**:
   - Uses the Master's margin _before_ the trade execution to calculate ratios, avoiding inflation caused by post-trade margin drops.
 - **Default Product Type**:
@@ -187,7 +189,7 @@ pms-trading/
 │   ├── replicator.py       # Child Execution Logic
 │   └── strategy_state.py   # State Persistence & Management (Decoupled)
 
-├── data/                   # JSON Database (accounts, orders)
+├── data/                   # JSON Database (accounts, orders, strategy_state)
 ├── db/                     # DB Connection Layer
 │   └── storage.py          # JSONStore Implementation
 ├── models/                 # Pydantic Models

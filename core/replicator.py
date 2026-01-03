@@ -175,10 +175,7 @@ async def execute_entry(master_id: str, allocation_pct: float, orders: list, mas
                 master_base = state_manager.get_master_initial_margin()
                 if master_base and master_base > 0:
                     ratio = child_live_balance / master_base
-                    # Cap Ratio at 1.0 (Safety)
-                    if ratio > 1.0:
-                        print(f"[{child_id}] Ratio {ratio:.2f} capped to 1.0")
-                        ratio = 1.0
+
                         
                     print(f"[{child_id}] Computed Frozen Ratio: {child_live_balance} / {master_base} = {ratio}")
                 else:
