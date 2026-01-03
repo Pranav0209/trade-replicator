@@ -25,7 +25,7 @@ A robust, margin-based trade replication system designed for Zerodha KiteConnect
   - **Connection Doctor**: Auto-verifies access tokens on page load using live API calls (`kite.profile()`). Alerts with **LOGIN REQ** if disconnected.
   - **Smart Formatting**: Auto-converts timestamps to local time (IST) and currency to Indian numbering format (₹1,00,000).
 - **Safety First**:
-  - Positions in the Master account are _observed_ but replication is event-driven.
+  - **Thread-Safe Data Layer**: Custom JSONStore implementation with `asyncio.Lock` ensures zero data corruption even under high concurrency (Polling + API).
   - **Polling-Only Architecture (V1)**:
     - Manual trade injection APIs (`/place-order`, `/replicate`) have been **removed** to enforce strict state consistency.
     - All trades MUST originate from the Master Account (Zerodha Web/App) and be detected by the `polling_service`.
@@ -34,19 +34,21 @@ A robust, margin-based trade replication system designed for Zerodha KiteConnect
     - **Exits**: Triggered _only_ by `Position Changes` (Net Quantity Delta).
     - **Zero Position Compliance**: If the Master account is detected as genuinely "Flat" (0 open positions) and no orders are pending, the system triggers a **100% Exit** on children.
 - **Precision & Robustness**:
-  - **Order Aggregation**: Automatically aggregates simultaneous split orders (e.g., Master splits 100 lots into 4x25) into a single virtual order before calculation. This eliminates rounding losses that occur when replicating small individual orders.
-  - **Duplicate Exit Prevention**: Smart tracking of local position state ensures that multiple exit signals for the same instrument do not trigger duplicate exit orders on child accounts.
-  - **Dynamic Lot Sizing**: Automatically adapts to different instruments. Defaults to `65` (User Config) for NIFTY indices/options and `1` for stocks/others.
-  - **Margin Debounce**: Prevents "False Signals" caused by API race conditions (where Margin updates arrive milliseconds before the Order confirmation). If a significant margin drift is detected without a corresponding order, the system "holds" the baseline until the order arrives.
-- **Self-Healing Mechanisms & Robustness**:
-  - **Order-Aware Sync Checks**: The emergency "Master Flat" check is now smart enough to pause if `New Orders` are detected in the same poll cycle. This prevents false "Panic Exits" when a new entry is placed but the Position API hasn't updated yet.
-  - **Entry Grace Window**: Implements a dedicated "Grace Period" (e.g., 10 seconds) after any new entry to further shield against API latency.
-  - **Active State Reconciliation**: Safely handles service restarts. If the strategy is Active but Master is genuinely Flat (after the grace period), it correctly triggers a 100% Exit on children and **clears the strategy state**, preventing infinite exit loops.
-  - **Redundant Exit Protection**: The Orchestrator ensures emergency exits are triggered exactly once per event, preventing duplicate order submission.
+  - **Uncapped Ratios (Upscaling)**: The system supports scaling up. If a child account has more capital than the master, it will trade proportionally larger sizes (e.g., 2.0x).
+  - **Order Aggregation**: Automatically aggregates simultaneous split orders (e.g., Master splits 100 lots into 4x25) into a single virtual order before calculation. This eliminates rounding losses.
+  - **Duplicate Exit Prevention**: Smart tracking of local position state ensures that multiple exit signals for the same instrument do not trigger duplicate exit orders.
+  - **Dynamic Lot Sizing**: Automatically adapts to different instruments. Defaults to `65` (User Config) for NIFTY.
+- **Self-Healing Mechanisms**:
+  - **Deep Strategy Reset**: The "Reset Strategy" button now performs a complete wipe:
+    1.  Clears disk state (`strategy_state.json`).
+    2.  Signals the Orchestrator to wipe internal memory (`reset_memory()`).
+    3.  Forces a re-initialization of the baseline on the next tick.
+  - **Polling Warmup**: The service pre-fetches existing order history on startup to prevent "Ghost Orders" from triggering stale replications.
+  - **Active State Reconciliation**: Safely handles service restarts. If the strategy is Active but Master is genuinely Flat, it triggers a safe emergency exit.
 - **Persisted State**:
-  - **Strategy State**: The "Frozen Ratio" is saved to disk (`data/strategy_state.json`) immediately upon creation.
-  - **Resilience**: The system can be restarted (e.g., over the weekend) and will resume the active strategy with the correct ratio on Monday.
-  - **Data**: Accounts and Order Logs are JSON-based and persistent.
+  - **Strategy State**: Saved to disk (`data/strategy_state.json`).
+  - **Resilience**: The system can be restarted and will resume the active strategy correctly.
+  - **Data**: Accounts and Order Logs are JSON-based, persistent, and thread-safe.
 
 ## 🛠️ Architecture
 

@@ -75,5 +75,19 @@ class StrategyState:
     def get_start_time(self) -> Optional[str]:
         return self._state.get("start_time")
 
+    def is_reset_requested(self) -> bool:
+        return self._state.get("reset_requested", False)
+    
+    def request_reset(self):
+        """Set reset_requested flag."""
+        self._state["reset_requested"] = True
+        self._save()
+        
+    def clear_reset_flag(self):
+        """Clear reset_requested flag."""
+        if "reset_requested" in self._state:
+            del self._state["reset_requested"]
+            self._save()
+
 # Singleton Instance
 state_manager = StrategyState()

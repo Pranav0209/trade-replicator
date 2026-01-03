@@ -10,43 +10,48 @@ ORDERS_FILE = DATA_DIR / "orders.json"
 class JSONStore:
     def __init__(self, filepath):
         self.filepath = filepath
+        self._lock = asyncio.Lock()
     
     async def find_one(self, query):
         """Find first document matching query."""
-        data = await self._read()
-        for doc in data:
-            match = all(doc.get(k) == v for k, v in query.items())
-            if match:
-                return doc
+        async with self._lock:
+            data = await self._read()
+            for doc in data:
+                match = all(doc.get(k) == v for k, v in query.items())
+                if match:
+                    return doc
         return None
     
     async def find(self, query):
         """Find all documents matching query."""
-        data = await self._read()
-        return [doc for doc in data if all(doc.get(k) == v for k, v in query.items())]
+        async with self._lock:
+            data = await self._read()
+            return [doc for doc in data if all(doc.get(k) == v for k, v in query.items())]
     
     async def insert_one(self, doc):
         """Insert a new document."""
-        data = await self._read()
-        data.append(doc)
-        await self._write(data)
+        async with self._lock:
+            data = await self._read()
+            data.append(doc)
+            await self._write(data)
         return doc
     
     async def update_one(self, query, update):
         """Update first document matching query."""
-        data = await self._read()
-        for i, doc in enumerate(data):
-            if all(doc.get(k) == v for k, v in query.items()):
-                if "$set" in update:
-                    doc.update(update["$set"])
-                elif "$push" in update:
-                    for key, val in update["$push"].items():
-                        if key not in doc:
-                            doc[key] = []
-                        doc[key].append(val)
-                data[i] = doc
-                await self._write(data)
-                return doc
+        async with self._lock:
+            data = await self._read()
+            for i, doc in enumerate(data):
+                if all(doc.get(k) == v for k, v in query.items()):
+                    if "$set" in update:
+                        doc.update(update["$set"])
+                    elif "$push" in update:
+                        for key, val in update["$push"].items():
+                            if key not in doc:
+                                doc[key] = []
+                            doc[key].append(val)
+                    data[i] = doc
+                    await self._write(data)
+                    return doc
         return None
     
     async def _read(self):
@@ -77,10 +82,7 @@ async def init_db():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     # Create empty files if they don't exist
     if not ACCOUNTS_FILE.exists():
-        await db.accounts.insert_one({})
-        data = await db.accounts._read()
-        if data and data[0] == {}:
-            await db.accounts._write([])
+        await db.accounts._write([])
     if not ORDERS_FILE.exists():
         await db.orders._write([])
     print("✅ JSON storage initialized")

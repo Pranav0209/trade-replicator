@@ -85,6 +85,19 @@ class MarginOrchestrator:
 
     # _reconcile_instrument_map Removed (Replaced by Deterministic Position Tracking)
 
+    def reset_memory(self):
+        """
+        Force clear all in-memory state.
+        Called when Strategy Reset is triggered via API.
+        """
+        print("[Orchestrator] 🛑 EXECUTE RESET MEMORY. Clearing all internal state.")
+        self._last_margin = 0.0
+        self._last_entry_ts = 0.0
+        self._master_capital = 0.0
+        self._active_trades.clear()
+        self._master_positions.clear()
+        self._initialized = False
+
     async def process_tick(self, new_orders: List[dict]):
         """
         Main polling hook.
@@ -92,6 +105,12 @@ class MarginOrchestrator:
         2. If NO orders -> Update state to drift with market.
         3. If NEW orders -> Calculate Delta -> Trigger Entry/Exit.
         """
+        # --- CHECK FOR EXTERNAL RESET SIGNAL ---
+        if state_manager.is_reset_requested():
+            self.reset_memory()
+            state_manager.clear_reset_flag()
+            # Do not return, let it fall through to re-initialize immediately
+            
         if not self._initialized:
             await self.initialize()
             return
@@ -202,7 +221,7 @@ class MarginOrchestrator:
                         self._master_positions[token] = curr_qty
 
             # Update State
-            self._master_positions = current_positions_map
+
             
             # --- STRATEGY LIFECYCLE MANAGEMENT ---
             # Strategy Ends ONLY if Master is completely flat (No open positions across ALL tokens).
@@ -217,27 +236,28 @@ class MarginOrchestrator:
             if new_orders:
                 # 3. New Orders Detected (ENTRY ONLY)
                 # Delta = Old (Before) - New (After)
-                margin_delta = self._last_margin - live_balance
-                print(f"[Orchestrator] Event! Old: {self._last_margin} -> New: {live_balance} | Delta: {margin_delta}")
-
                 if margin_delta > 0:
-                    # --- ENTRY (Margin Used) ---
-                    if margin_delta < 500: 
-                        print("[Orchestrator] Delta too small, ignoring.")
+                    # --- SAFEGUARD: Prevent Margin Release False Positives ---
+                    if state_manager.is_active():
+                        print("[Orchestrator] Strategy ALREADY ACTIVE. Skipping margin-based entry trigger.")
                     else:
-                        allocation_pct = margin_delta / self._master_capital
-                        print(f"[Orchestrator] ENTRY Triggered. Incremental Alloc%: {allocation_pct:.4f} (Delta: {margin_delta:.2f})")
-                        
-                        # Note: We don't update _instrument_map anymore (it's gone).
-                        # We strictly rely on Positions for exits.
-                        
-                        await execute_entry(
-                            master_id=self.master_id, 
-                            allocation_pct=allocation_pct, 
-                            orders=new_orders,
-                            master_pre_trade_margin=self._master_capital # Use Total Capital (Equity) for ratio
-                        )
-                        self._last_entry_ts = time.time()
+                        # --- ENTRY (Margin Used) ---
+                        if margin_delta < 500: 
+                            print("[Orchestrator] Delta too small, ignoring.")
+                        else:
+                            allocation_pct = margin_delta / self._master_capital
+                            print(f"[Orchestrator] ENTRY Triggered. Incremental Alloc%: {allocation_pct:.4f} (Delta: {margin_delta:.2f})")
+                            
+                            # Note: We don't update _instrument_map anymore (it's gone).
+                            # We strictly rely on Positions for exits.
+                            
+                            await execute_entry(
+                                master_id=self.master_id, 
+                                allocation_pct=allocation_pct, 
+                                orders=new_orders,
+                                master_pre_trade_margin=self._master_capital # Use Total Capital (Equity) for ratio
+                            )
+                            self._last_entry_ts = time.time()
             
             # REMOVED: elif margin_delta < 0 (Margin Based Exit)
 

@@ -12,7 +12,7 @@ async def get_orders(account_id: str):
     """
     Get all orders for an account.
     """
-    orders = await db.orders.find({"account_id": account_id}).to_list(100)
+    orders = await db.orders.find({"account_id": account_id})
     return {
         "account_id": account_id,
         "count": len(orders),
@@ -26,15 +26,16 @@ async def reset_strategy():
     Useful for starting a new trade cycle manually.
     """
     try:
-        import json
-        state_file = "data/strategy_state.json"
-        empty_state = {
-            "active": False,
-            "frozen_ratio": None,
-            "master_initial_margin": None
-        }
-        with open(state_file, "w") as f:
-            json.dump(empty_state, f, indent=2)
+        from core.strategy_state import state_manager
+        
+        # 1. Clear Active State immediately
+        state_manager.clear()
+        
+        # 2. Set Flag for Orchestrator to clear its memory
+        state_manager.request_reset()
+            
+        print("[System] Strategy State Manually Reset via API. Requesting Orchestrator State Clear.")
+        return {"status": "ok", "message": "Strategy state reset successfully. Orchestrator will clear memory on next tick."}
             
         print("[System] Strategy State Manually Reset via API.")
         return {"status": "ok", "message": "Strategy state reset successfully"}

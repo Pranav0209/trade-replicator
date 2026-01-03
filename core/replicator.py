@@ -232,7 +232,7 @@ async def execute_entry(master_id: str, allocation_pct: float, orders: list, mas
                     # Real Order Placement
                     try:
                         print(f"[{child_id}] Placing ENTRY {transaction_type} {child_quantity} {tradingsymbol}")
-                        order_id = kite.place_order(
+                        order_id = k_c.place_order(
                             tradingsymbol=tradingsymbol,
                             exchange=exchange,
                             transaction_type=transaction_type,
@@ -321,7 +321,10 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
                 try:
                     positions = kite.positions()
                     net_positions = positions.get("net", [])
-                    pos_map = {p["instrument_token"]: p["quantity"] for p in net_positions if p["quantity"] != 0}
+                    pos_map = {
+                        p["instrument_token"]: {"qty": p["quantity"], "symbol": p["tradingsymbol"]} 
+                        for p in net_positions if p["quantity"] != 0
+                    }
                 except Exception as e:
                     print(f"[{child_id}] Failed to fetch positions: {e}")
                     continue
@@ -332,15 +335,17 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
             if not orders and exit_ratio >= 0.99:
                  print(f"[{child_id}] CLOSE ALL Triggered (No specific orders provided).")
                  # Create virtual orders for ALL open positions to force close them
-                 for token, qty in pos_map.items():
+                 for token, data in pos_map.items():
+                     qty = data["qty"]
+                     symbol = data["symbol"]
                      if qty != 0:
                          # If Long (qty > 0), we SELL. If Short (qty < 0), we BUY.
                          tx_type = "SELL" if qty > 0 else "BUY"
                          targets.append({
                              "instrument_token": token,
                              "transaction_type": tx_type, 
-                             "tradingsymbol": f"TOKEN:{token}", # We might lack symbol if not in map, relying on token
-                             "exchange": "NFO", # Assumption! Dangerous if MCX. But usually NFO.
+                             "tradingsymbol": symbol, # Correct Symbol from Position Map
+                             "exchange": "NFO", 
                              "product": "NRML"   # Default to NRML
                          })
                          # Note: For real Close All, we might need to fetch symbol from instrument list if unknown.
@@ -358,7 +363,8 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
                 product = order.get("product", "NRML")
                 
                 # Check if child has this position
-                child_open_qty = pos_map.get(instrument_token, 0)
+                pos_data = pos_map.get(instrument_token, {"qty": 0})
+                child_open_qty = pos_data["qty"]
                 
                 # Exit implies reducing exposure.
                 # If Master Sells, Child should Sell. 
@@ -397,12 +403,12 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
                 # FIX: Updates usage tracking to prevent double counting if multiple orders for same token exist
                 # Decrement the available quantity for subsequent orders in this loop
                 if child_open_qty > 0:
-                     pos_map[instrument_token] = max(0, child_open_qty - exit_qty)
+                     pos_map[instrument_token]["qty"] = max(0, child_open_qty - exit_qty)
                 else:
                      # Short position (negative qty), so we add (moving towards 0)
                      # or properly: reduce the magnitude
                      remainder = abs(child_open_qty) - exit_qty
-                     pos_map[instrument_token] = -remainder
+                     pos_map[instrument_token]["qty"] = -remainder
 
                 if config.DRY_RUN:
                     print(f"[DRY RUN] {child_id} | Place {transaction_type} {exit_qty} {tradingsymbol}")
@@ -420,6 +426,8 @@ async def execute_exit(master_id: str, exit_ratio: float, orders: list):
                 else:
                     # Place Real Order
                     try:
+
+
                         order_id = kite.place_order(
                             tradingsymbol=tradingsymbol,
                             exchange=exchange,
