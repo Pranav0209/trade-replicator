@@ -24,6 +24,9 @@ A robust, margin-based trade replication system designed for Zerodha KiteConnect
   - **Smart Formatting**: Auto-converts timestamps to local time (IST) and currency to Indian numbering format (₹1,00,000).
 - **Safety First**:
   - Positions in the Master account are _observed_ but replication is event-driven.
+  - **Polling-Only Architecture (V1)**:
+    - Manual trade injection APIs (`/place-order`, `/replicate`) have been **removed** to enforce strict state consistency.
+    - All trades MUST originate from the Master Account (Zerodha Web/App) and be detected by the `polling_service`.
   - **Strict Logic Separation**:
     - **Entries**: Triggered _only_ by `New Orders` + `Margin Delta` (Economic Exposure).
     - **Exits**: Triggered _only_ by `Position Changes` (Net Quantity Delta).
@@ -192,7 +195,7 @@ pms-trading/
 ├── routes/                 # API Routes
 │   ├── accounts.py         # Account Management
 │   ├── auth.py             # Authentication & Token Management
-│   └── trading.py          # Manual Trade Execution
+│   └── trading.py          # Trade History & Strategy Reset (Read-Only/Admin)
 ├── templates/              # Frontend
 │   └── index.html          # Dashboard UI
 └── get_master_positions.py # Utility script

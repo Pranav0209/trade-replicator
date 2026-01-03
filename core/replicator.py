@@ -56,28 +56,7 @@ def aggregate_orders(orders: list) -> list:
         
     return aggregated
 
-async def replicate_order(master_account_id: str, child_account_ids: list, **kwargs):
-    """
-    Compatibility wrapper for legacy API calls.
-    Redirects to execute_entry or execute_exit based on transaction type.
-    """
-    transaction_type = kwargs.get("transaction_type")
-    
-    # Construct a mock 'order' object from kwargs
-    order = kwargs.copy()
-    order["quantity"] = kwargs.get("master_quantity", 0)
-    
-    orders = [order]
-    
-    if transaction_type == "BUY": # Simplistic assumption for Entry
-        await execute_entry(master_account_id, 0.0, orders)
-        return [{"status": "triggered", "mode": "entry"}]
-        
-    elif transaction_type == "SELL": # Simplistic assumption for Exit
-        await execute_exit(master_account_id, 1.0, orders)
-        return [{"status": "triggered", "mode": "exit"}]
-        
-    return []
+
 
 
 async def get_master_capital(master_account_id: str) -> float:
